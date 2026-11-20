@@ -173,7 +173,11 @@ SpotySync.exe --all --refresh
 
 ## Building
 
-Requirements: Windows, .NET SDK 8 or newer, and .NET Framework 4.7.2 targeting support. Run:
+Requirements: Windows, .NET SDK 8 or newer, and .NET Framework 4.7.2 targeting support.
+
+**Just to run it from source:** build `src\SpotySync.App\SpotySync.App.csproj`, in Visual Studio or with `dotnet build -c Release`. The first build automatically downloads the pinned, checksum-verified tools into the app's `Tools` folder (about 250 MB, cached in `.tools-cache`). These are spotDL, yt-dlp, FFmpeg, Deno and the Premium token helper. The build also puts the MusicBee plugin in `MusicBee Plugin`, so the output folder is ready to run. Debug and Release builds go to separate folders (`bin\Debug\...` and `bin\Release\...`), each with its own settings and login.
+
+**To make the portable release ZIP**, run:
 
 ```powershell
 .\build-release.ps1

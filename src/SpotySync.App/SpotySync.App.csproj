@@ -15,4 +15,30 @@
   <ItemGroup>
     <ProjectReference Include="../SpotySync.Core/SpotySync.Core.csproj" />
   </ItemGroup>
+
+  <!-- Make a plain build (Visual Studio or dotnet build) a complete, runnable app folder. -->
+  <PropertyGroup>
+    <SpotySyncRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\'))</SpotySyncRoot>
+  </PropertyGroup>
+
+  <!-- The MusicBee plugin, placed in "MusicBee Plugin" beside SpotySync.exe for Settings › Install MusicBee plugin. -->
+  <Target Name="CopyMusicBeePlugin" AfterTargets="Build" Condition="'$(SkipMusicBeePlugin)' != 'true'">
+    <!-- Restore separately (a fresh clone has no obj\ for the plugin); the extra property forces a fresh evaluation. -->
+    <MSBuild Projects="$(SpotySyncRoot)src\SpotySync.MusicBeePlugin\SpotySync.MusicBeePlugin.csproj"
+             Properties="Configuration=$(Configuration);SpotySyncPluginRestore=true" Targets="Restore" />
+    <MSBuild Projects="$(SpotySyncRoot)src\SpotySync.MusicBeePlugin\SpotySync.MusicBeePlugin.csproj"
+             Properties="Configuration=$(Configuration)" Targets="Build">
+      <Output TaskParameter="TargetOutputs" ItemName="SpotySyncPluginDll" />
+    </MSBuild>
+    <Copy SourceFiles="@(SpotySyncPluginDll)" DestinationFolder="$(TargetDir)MusicBee Plugin" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(SpotySyncRoot)MusicBee Plugin README.txt" DestinationFiles="$(TargetDir)MusicBee Plugin\README.txt" SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- spotDL, yt-dlp, FFmpeg, Deno and the Premium token helper are too large for git: download the pinned,
+       checksum-verified official releases into Tools the first time (skipped once they are there). -->
+  <Target Name="FetchPortableTools" AfterTargets="Build"
+          Condition="'$(OS)' == 'Windows_NT' and '$(SkipToolFetch)' != 'true' and (!Exists('$(TargetDir)Tools\yt-dlp.exe') or !Exists('$(TargetDir)Tools\spotdl.exe') or !Exists('$(TargetDir)Tools\deno.exe') or !Exists('$(TargetDir)Tools\ffmpeg.exe') or !Exists('$(TargetDir)Tools\ffprobe.exe') or !Exists('$(TargetDir)Tools\yt-dlp-plugins\bgutil-ytdlp-pot-provider.zip') or !Exists('$(TargetDir)Tools\bgutil-server\src\generate_once.ts'))">
+    <Message Importance="high" Text="SpotySync: fetching portable tools into $(TargetDir)Tools (first build only, about 250 MB)..." />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(SpotySyncRoot)fetch-tools.ps1&quot; -ToolsDir &quot;$(TargetDir)Tools&quot;" />
+  </Target>
 </Project>
