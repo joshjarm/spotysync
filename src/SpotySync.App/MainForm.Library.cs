@@ -23,6 +23,13 @@ public sealed partial class MainForm
     private readonly ToggleSwitch libraryIgnoreSoundtracks = new() { Text = "Skip soundtrack folders", Checked = true };
     private readonly RoundedButton libraryDownload = RoundedButton.Make("Download missing", ButtonKind.Primary, Glyph.Download);
     private readonly RoundedButton librarySavePlaylist = RoundedButton.Make("Save as playlist", ButtonKind.Secondary, Glyph.List);
+    private readonly RoundedButton librarySelectAll = RoundedButton.Make("Select all", ButtonKind.Secondary, Glyph.Check);
+    /// <summary>Ticked rows (by song), kept across live refreshes. Nothing is ticked until you tick it.</summary>
+    private readonly HashSet<string> libraryTicked = new(StringComparer.OrdinalIgnoreCase);
+
+    private static string RowKey(InsightRow row) => row.Kind + "|" + (row.Path.Length > 0 ? row.Path : row.SpotifyId);
+
+    private List<InsightRow> TickedInsights() => VisibleInsights().Where(r => !IsExcluded(r) && libraryTicked.Contains(RowKey(r))).ToList();
     private readonly Card libraryEmpty = new() { Title = "Find what's slipping through the cracks", Eyebrow = "Library tools", Glyph = Glyph.Library, Dock = DockStyle.Top, Height = 230 };
     private readonly Card libraryResults = new() { Dock = DockStyle.Fill, Inner = new Padding(10, 8, 6, 10) };
     private LibraryReport? libraryReport;
@@ -64,14 +71,16 @@ public sealed partial class MainForm
         tips.SetToolTip(libraryIgnoreSoundtracks, "Leave out folders like Music\\Blockheads that Soundtrack Saver manages — soundtracks usually aren't in playlists on purpose.");
         libraryInfo.AutoSize = true; libraryInfo.Margin = new Padding(0, 9, 0, 0);
         leftActions.Controls.Add(librarySearch); leftActions.Controls.Add(libraryIgnoreSoundtracks); leftActions.Controls.Add(libraryInfo);
-        var rightActions = new Row(rightToLeft: true) { Dock = DockStyle.Right, Width = 560, Padding = new Padding(0, 4, 0, 0) };
+        var rightActions = new Row(rightToLeft: true) { Dock = DockStyle.Right, Width = 700, Padding = new Padding(0, 4, 0, 0) };
         libraryDownload.Click += async (_, _) => await DownloadMissingLikesAsync();
         busyButtons.Add(libraryDownload);
         librarySavePlaylist.Click += (_, _) => SaveInsightPlaylist();
-        tips.SetToolTip(librarySavePlaylist, "Writes the shown local files to an M3U8 playlist in your M3U folder (drag it into MusicBee to review them).");
+        tips.SetToolTip(librarySavePlaylist, "Writes the ticked local files (or all shown, when none are ticked) to an M3U8 playlist in your M3U folder.");
+        librarySelectAll.Click += (_, _) => ToggleSelectAll();
+        tips.SetToolTip(librarySelectAll, "Tick every shown song — becomes Deselect once anything is ticked");
         var export = RoundedButton.Make("Export CSV", ButtonKind.Ghost, Glyph.Save, (_, _) => ExportInsightCsv());
         var copy = RoundedButton.Make("Copy", ButtonKind.Ghost, Glyph.Copy, (_, _) => CopyInsights());
-        foreach (var b in new Control[] { libraryDownload, librarySavePlaylist, export, copy }) { b.Margin = new Padding(6, 0, 0, 0); rightActions.Controls.Add(b); }
+        foreach (var b in new Control[] { libraryDownload, librarySavePlaylist, librarySelectAll, export, copy }) { b.Margin = new Padding(6, 0, 0, 0); rightActions.Controls.Add(b); }
         actions.Absorb(leftActions, rightActions);
 
         libraryHelp.Dock = DockStyle.Top; libraryHelp.Height = 24; libraryHelp.TextAlign = ContentAlignment.MiddleLeft;
@@ -96,10 +105,11 @@ public sealed partial class MainForm
         libraryGrid.Dimmed = IsExcluded;
         libraryGrid.CheckToggled += rows =>
         {
-            // flip as a group: if any is still ticked, untick them all; otherwise tick them all
-            if (rows.Any(r => !IsExcluded(r))) DownloadExclusions.Add(rows.Select(r => (r.SpotifyId, r.DisplayName)));
-            else DownloadExclusions.Remove(rows.Select(r => r.SpotifyId));
-            UpdateLibraryState(); // chip count
+            // flip as a group: if any is unticked, tick them all; otherwise untick them all
+            var keys = rows.Where(r => !IsExcluded(r)).Select(RowKey).ToList();
+            if (keys.Any(k => !libraryTicked.Contains(k))) libraryTicked.UnionWith(keys);
+            else libraryTicked.ExceptWith(keys);
+            UpdateLibraryActions();
         };
         libraryGrid.RowActivated += OpenInsight;
         var menu = Ui.Menu();
@@ -139,8 +149,29 @@ public sealed partial class MainForm
         if (excluded) DownloadExclusions.Add(rows.Select(r => (r.SpotifyId, r.DisplayName)));
         else DownloadExclusions.Remove(rows.Select(r => r.SpotifyId));
         AppendLog(excluded ? $"Won't download {rows.Count} Liked song(s) (Data\\download-exclusions.txt)." : $"{rows.Count} Liked song(s) can be downloaded again.");
+        if (excluded) libraryTicked.ExceptWith(rows.Select(RowKey));
         UpdateLibraryState();
         libraryGrid.RefreshRows(); // rows stay in place (and selected); only their look changes
+    }
+
+    private void ToggleSelectAll()
+    {
+        var shown = VisibleInsights().Where(r => !IsExcluded(r)).ToList();
+        if (TickedInsights().Count > 0) libraryTicked.ExceptWith(shown.Select(RowKey));
+        else libraryTicked.UnionWith(shown.Select(RowKey));
+        libraryGrid.RefreshRows();
+        UpdateLibraryActions();
+    }
+
+    /// <summary>Select all ⇄ Deselect, and the Download button's count.</summary>
+    private void UpdateLibraryActions()
+    {
+        var ticked = TickedInsights().Count;
+        librarySelectAll.Text = ticked > 0 ? $"Deselect ({ticked:N0})" : "Select all";
+        librarySelectAll.Glyph = ticked > 0 ? Glyph.Clear : Glyph.Check;
+        libraryDownload.Text = ticked > 0 ? $"Download {ticked:N0} selected" : "Download selected";
+        libraryDownload.Enabled = cancellation is null && ticked > 0;
+        tips.SetToolTip(libraryDownload, ticked > 0 ? "Download the ticked Liked songs" : "Tick songs (or click Select all) to choose what to download");
     }
 
     private void UpdateLibraryState()
@@ -157,7 +188,8 @@ public sealed partial class MainForm
         libraryDownload.Visible = libraryKind == InsightKind.LikedMissingLocally;
         librarySavePlaylist.Visible = libraryKind is not (InsightKind.LikedMissingLocally or InsightKind.LikedNotInPlaylist);
         libraryInfo.Text = libraryReport is null ? "" :
-            $"{libraryReport.LibraryCount:N0} songs · {libraryReport.LocalPlaylistCount} local and {libraryReport.SpotifyPlaylistCount} Spotify playlists · analysed {libraryReport.CreatedAt:HH:mm}";
+            $"{libraryReport.LibraryCount:N0} songs · {libraryReport.LocalPlaylistCount} local and {libraryReport.SpotifyPlaylistCount} Spotify playlists · updated {libraryReport.CreatedAt:HH:mm}";
+        UpdateLibraryActions();
         RefreshDashboard();
     }
 
@@ -200,21 +232,24 @@ public sealed partial class MainForm
         }
         else
         {
+            // re-read the music folder first, so songs downloaded since the preview was built are included
+            await RefreshLibraryLiveAsync();
             BuildLibraryReport();
             SavePreviewSnapshot();
-            AppendLog("Library analysed from the current sync preview.");
+            AppendLog("Library analysed (music folder re-checked; Spotify data from the current sync preview).");
         }
         if (!StayOnDashboard) SelectPage(PageLibrary);
     }
 
-    private void BuildLibraryReport()
+    private void BuildLibraryReport(bool quiet = false)
     {
         if (prepared is null) return;
         libraryReport = LibraryInsights.Build(prepared, libraryIgnoreSoundtracks.Checked ? SoundtrackFolders() : null);
-        AppendLog($"Library insights: {libraryReport.Unplaylisted.Count} song(s) in no playlist, {libraryReport.LikedMissingLocally.Count} Liked song(s) not downloaded, " +
-                  $"{libraryReport.LikedNotInPlaylist.Count} Like(s) in no playlist, {libraryReport.Duplicates.Count} duplicate file(s).");
+        if (!quiet)
+            AppendLog($"Library insights: {libraryReport.Unplaylisted.Count} song(s) in no playlist, {libraryReport.LikedMissingLocally.Count} Liked song(s) not downloaded, " +
+                      $"{libraryReport.LikedNotInPlaylist.Count} Like(s) in no playlist, {libraryReport.Duplicates.Count} duplicate file(s).");
         UpdateLibraryState();
-        FillLibraryGrid();
+        FillLibraryGrid(preserveView: quiet);
     }
 
     private List<InsightRow> VisibleInsights()
@@ -227,15 +262,20 @@ public sealed partial class MainForm
             .ToList();
     }
 
-    private void FillLibraryGrid()
+    private void FillLibraryGrid(bool preserveView = false)
     {
-        // tick = download it, untick = never download (saved in Data\download-exclusions.txt)
-        libraryGrid.Checked = libraryKind == InsightKind.LikedMissingLocally ? r => !IsExcluded(r) : null;
-        libraryGrid.Items = VisibleInsights();
+        // tick = selected for the actions (download, save as playlist, copy, export); excluded songs have no box
+        libraryGrid.Checked = r => IsExcluded(r) ? null : libraryTicked.Contains(RowKey(r));
+        if (preserveView) libraryGrid.ReplaceItems(VisibleInsights(), RowKey);
+        else libraryGrid.Items = VisibleInsights();
+        UpdateLibraryActions();
     }
 
+    /// <summary>The ticked rows; with none ticked, the highlighted rows (when asked) or everything shown.</summary>
     private List<InsightRow> SelectedOrAll(bool selectedOnly)
     {
+        var ticked = TickedInsights();
+        if (ticked.Count > 0) return ticked;
         if (selectedOnly && libraryGrid.SelectedCount > 0) return libraryGrid.SelectedItems;
         return VisibleInsights();
     }
@@ -276,7 +316,7 @@ public sealed partial class MainForm
 
     private void SaveInsightPlaylist()
     {
-        var rows = VisibleInsights().Where(r => r.Path.Length > 0).ToList();
+        var rows = SelectedOrAll(false).Where(r => r.Path.Length > 0).ToList();
         if (rows.Count == 0) { MessageBox.Show(this, "There are no local files in this list.", "SpotySync", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
         try
         {
@@ -291,7 +331,7 @@ public sealed partial class MainForm
 
     private void ExportInsightCsv()
     {
-        var rows = VisibleInsights();
+        var rows = SelectedOrAll(false);
         if (rows.Count == 0) return;
         using var dialog = new SaveFileDialog { Filter = "CSV file|*.csv", FileName = InsightFileStem() + ".csv" };
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
@@ -317,13 +357,13 @@ public sealed partial class MainForm
 
     private async Task DownloadMissingLikesAsync()
     {
-        var rows = SelectedOrAll(libraryGrid.SelectedCount > 1).Where(r => r.SpotifyId.Length > 0 && !IsExcluded(r)).ToList();
+        var rows = TickedInsights().Where(r => r.SpotifyId.Length > 0).ToList();
         if (rows.Count == 0)
         {
-            MessageBox.Show(this, "Nothing to download — every listed song is excluded (right-click › Allow downloading again).", "Download missing Likes", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "Tick the songs to download first (or click Select all).", "Download missing Likes", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        if (MessageBox.Show(this, $"Download {rows.Count} Liked song(s) that aren't in your library yet?\r\n\r\nTip: select rows first to download only some of them.",
+        if (MessageBox.Show(this, $"Download {rows.Count} ticked Liked song(s) that aren't in your library yet?\r\n\r\nYou can pause or cancel at any time; each finished song is added to the library right away.",
                 "Download missing Likes", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
         if (!SaveSettingsFields(false)) return;
         await RunBusyAsync($"Downloading {rows.Count} missing Liked song(s)", async token =>
@@ -331,7 +371,6 @@ public sealed partial class MainForm
             var result = await service.DownloadLinksAsync(rows.Select(r => r.SpotifyUrl), token);
             if (!result.Success) AppendLog("WARNING: " + result.Error);
             SetResult($"Missing Likes: {result.NewAudioFiles} new audio file(s); {result.ImportedFiles} verified in MusicBee.", result.Success ? Led.Ok : Led.Warn);
-            if (result.NewAudioFiles > 0) AppendLog("Run “Analyse library” again to re-check what is still missing.");
         });
     }
 }

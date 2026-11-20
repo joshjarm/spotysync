@@ -315,12 +315,27 @@ public sealed class SpotifyApi : IDisposable
                 await Task.Delay(wait, cancellationToken);
                 continue;
             }
-            var explanation = responseBody.Contains("QUOTA_EXCEEDED", StringComparison.OrdinalIgnoreCase)
-                ? "Spotify Development Mode quota is exhausted. Cached data was preserved; try later."
-                : $"Spotify API returned {(int)response.StatusCode} {response.ReasonPhrase} for {method} {new Uri(absolute).AbsolutePath}.";
+            var quota = responseBody.Contains("QUOTA_EXCEEDED", StringComparison.OrdinalIgnoreCase);
+            if (quota)
+            {
+                var retry = response.Headers.RetryAfter;
+                var wait = retry?.Delta ?? (retry?.Date is { } at ? at - DateTimeOffset.UtcNow : (TimeSpan?)null);
+                var resetNote = wait is { } w && w > TimeSpan.Zero
+                    ? $"Spotify says it resets in {FormatWait(w)} (about {DateTime.Now + w:g})."
+                    : "Spotify sent no Retry-After; Development Mode quotas use a rolling ~24 hour window, so it should clear within 24 hours of the heavy use.";
+                log($"Quota hit on {method} {new Uri(absolute).AbsolutePath}. {resetNote}");
+                var trimmed = responseBody.Length > 400 ? responseBody[..400] + "…" : responseBody;
+                log($"Spotify response: {trimmed.Trim()}");
+                throw new ApiException((int)response.StatusCode,
+                    $"Spotify Development Mode quota is exhausted. {resetNote} Cached data was preserved.", responseBody);
+            }
+            var explanation = $"Spotify API returned {(int)response.StatusCode} {response.ReasonPhrase} for {method} {new Uri(absolute).AbsolutePath}.";
             throw new ApiException((int)response.StatusCode, explanation, responseBody);
         }
     }
+
+    private static string FormatWait(TimeSpan w) =>
+        w.TotalHours >= 1 ? $"{(int)w.TotalHours}h {w.Minutes}m" : w.TotalMinutes >= 1 ? $"{(int)w.TotalMinutes}m {w.Seconds}s" : $"{(int)Math.Ceiling(w.TotalSeconds)}s";
 
     private static TrackInfo ParseTrack(JsonElement item)
     {

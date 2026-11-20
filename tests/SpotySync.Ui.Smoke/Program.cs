@@ -32,7 +32,7 @@ settings.Save();
 
 Application.EnableVisualStyles();
 Application.SetCompatibleTextRenderingDefault(false);
-using var form = new MainForm(settings) { StartupPrompts = false, Size = new Size(1600, 920), FormBorderStyle = FormBorderStyle.None, StartPosition = FormStartPosition.Manual, Location = new Point(-30000, -30000) };
+using var form = new MainForm(settings) { StartupPrompts = false, LiveLibrary = false, Size = new Size(1600, 920), FormBorderStyle = FormBorderStyle.None, StartPosition = FormStartPosition.Manual, Location = new Point(-30000, -30000) };
 var prepared = MockPrepared();
 SetField(form, "prepared", prepared);
 Invoke(form, "PopulatePlan", prepared.Plan);
@@ -41,7 +41,7 @@ Application.DoEvents();
 
 Capture(form, 0, Path.Combine(output, "dashboard.png"));
 Capture(form, 1, Path.Combine(output, "preview.png"));
-Invoke(form, "BuildLibraryReport");
+Invoke(form, "BuildLibraryReport", false);
 Capture(form, 2, Path.Combine(output, "library.png"));
 Capture(form, 3, Path.Combine(output, "console.png"));
 Capture(form, 4, Path.Combine(output, "settings.png"));
@@ -51,6 +51,7 @@ MeasurePaint(form);
 ValidateDashboardLayout(form);
 ValidatePreviewInteractions(form);
 ValidatePreviewSnapshot(form);
+ValidateLiveFeatures(form, output);
 if (Environment.GetEnvironmentVariable("SPOTYSYNC_FLICKER_PROBE") == "1")
 {
     var brightFrames = FlickerProbe.Run(form, (PortableSettings)GetField(form, "settings"), output);
@@ -538,4 +539,120 @@ static PreparedSync MockPrepared()
         Liked = new LikedTrackCache { SpotifyUserId = "ui-smoke", Tracks = tracks },
         SpotifyPlaylists = [new PlaylistInfo { Id = "sample", Name = "1st Playlist", Tracks = tracks }]
     };
+}
+
+// Dashboard drag into a column / minimize, the full dashboard console, song names in the status bar, Library
+// selection, the Console split view, the live download graph and its full-screen window.
+static void ValidateLiveFeatures(MainForm form, string output)
+{
+    var settings = (PortableSettings)GetField(form, "settings");
+    var modules = ((System.Collections.IList)GetField(form, "dashCards")).Cast<object>().ToList();
+    object Module(string id) => modules.First(m => (string)m.GetType().GetProperty("Id")!.GetValue(m)! == id);
+    Control CardOf(string id) => (Control)Module(id).GetType().GetProperty("Card")!.GetValue(Module(id))!;
+    var grid = (Control)GetField(form, "dashGrid");
+
+    // 1. three modules side by side: drag the middle one under the left one
+    settings.UiDashboardCards = "actions:1:320:0:160,soundtrack:1:320:1:160,console:1:320:2:160,activity:3:320:0:600,-preview:1:480,-library:2:420";
+    Invoke(form, "SelectPage", 0);
+    Invoke(form, "ApplyDashboardLayout");
+    Application.DoEvents(); LayoutAll(form);
+    var left = CardOf("actions"); var middle = CardOf("soundtrack");
+    WaitFor(() => middle.Left > left.Right && middle.Top == left.Top, 2000);
+    if (!(middle.Left > left.Right && middle.Top == left.Top)) throw new InvalidOperationException($"Setup: modules are not side by side ({left.Bounds} / {middle.Bounds}).");
+    var cursor = middle.PointToScreen(new Point(60, 20)); var down = true;
+    SetField(form, "gestureCursor", (Func<Point>)(() => cursor));
+    SetField(form, "gestureButtonDown", (Func<bool>)(() => down));
+    var begin = form.GetType().GetMethod("BeginCardGesture", BindingFlags.Instance | BindingFlags.NonPublic)!;
+    var tick = form.GetType().GetMethod("GestureTick", BindingFlags.Instance | BindingFlags.NonPublic)!;
+    begin.Invoke(form, [Module("soundtrack"), new MouseEventArgs(MouseButtons.Left, 1, 60, 20, 0)]);
+    cursor = grid.PointToScreen(new Point(left.Left + 60, left.Bottom + 40 + 20));
+    tick.Invoke(form, null); tick.Invoke(form, null); tick.Invoke(form, null);
+    down = false; tick.Invoke(form, null);
+    WaitFor(() => middle.Left == left.Left && middle.Top > left.Bottom, 2000);
+    if (middle.Left != left.Left || middle.Top <= left.Bottom)
+        throw new InvalidOperationException($"Dragging a module under another did not put it there ({middle.Bounds} vs {left.Bounds}); layout '{settings.UiDashboardCards}'.");
+    if (!settings.UiDashboardCards.Contains("soundtrack:1:320:0:")) throw new InvalidOperationException("The new column was not saved: " + settings.UiDashboardCards);
+    SetField(form, "gestureCursor", (Func<Point>)(() => Cursor.Position));
+    SetField(form, "gestureButtonDown", (Func<bool>)(() => (Control.MouseButtons & MouseButtons.Left) != 0));
+    using (var shot = new Bitmap(form.ClientSize.Width, form.ClientSize.Height)) { form.DrawToBitmap(shot, form.ClientRectangle); shot.Save(Path.Combine(output, "dashboard-dragged.png"), System.Drawing.Imaging.ImageFormat.Png); }
+
+    // 2. minimize / restore
+    var consoleCard = CardOf("console");
+    var minimizedHeight = (int)consoleCard.GetType().GetProperty("MinimizedHeight")!.GetValue(consoleCard)!;
+    Invoke(form, "ToggleDashCardMinimized", "console");
+    WaitFor(() => consoleCard.Height == minimizedHeight, 2000);
+    if (consoleCard.Height != minimizedHeight || !settings.UiDashboardCards.Contains("~console")) throw new InvalidOperationException($"Minimize did not collapse the module ({consoleCard.Height}, '{settings.UiDashboardCards}').");
+    Invoke(form, "ToggleDashCardMinimized", "console");
+    WaitFor(() => consoleCard.Height == 320, 2000);
+    if (consoleCard.Height != 320) throw new InvalidOperationException("Restore did not bring the module back.");
+
+    // 3. the dashboard console shows everything, including downloader detail lines
+    var console = GetField(form, "console");
+    var id = 1.ToString("D22");
+    var entry = console.GetType().GetMethod("Append")!.Invoke(console, ["download | Processing query: https://open.spotify.com/track/" + id])!;
+    Application.DoEvents();
+    var feed = (RichTextBox)GetField(form, "dashFeed");
+    if (!feed.Text.Contains("Processing query: https://open.spotify.com/track/" + id)) throw new InvalidOperationException("The dashboard console left out a downloader detail line.");
+
+    // 4. status bar: title, artist(s), then the link
+    var line = (string)Invoke(form, "StatusLine", entry)!;
+    if (!line.Contains("Track 1 — The Midnight  ·  https://open.spotify.com/track/" + id)) throw new InvalidOperationException("Status line lacks the song name before the link: " + line);
+
+    // 5. Library: nothing ticked until you tick; Select all ⇄ Deselect
+    Invoke(form, "ShowInsight", InsightKind.NoLocalPlaylist);
+    int Ticked() => ((System.Collections.ICollection)Invoke(form, "TickedInsights")!).Count;
+    var selectAll = (Button)GetField(form, "librarySelectAll");
+    if (Ticked() != 0 || selectAll.Text != "Select all") throw new InvalidOperationException("Library rows were ticked by default.");
+    Invoke(form, "ToggleSelectAll");
+    if (Ticked() == 0 || !selectAll.Text.StartsWith("Deselect")) throw new InvalidOperationException("Select all did not tick the rows / turn into Deselect.");
+    Invoke(form, "ToggleSelectAll");
+    if (Ticked() != 0 || selectAll.Text != "Select all") throw new InvalidOperationException("Deselect did not clear the ticks.");
+
+    // 6. Console page split with the download graph
+    Invoke(form, "SelectPage", 3);
+    Invoke(form, "SetConsoleSplit", true);
+    Application.DoEvents(); LayoutAll(form);
+    var split = (SplitContainer)GetField(form, "consoleSplit");
+    if (split.Panel2Collapsed || ((Control)GetField(form, "consoleGraph")).Width < 200) throw new InvalidOperationException("The Console split view did not show the graph.");
+
+    // 7. a simulated download run drives the graph (a growing .part file + a finished song)
+    var monitor = GetField(form, "downloadMonitor");
+    var music = Path.Combine(output, "graph-music");
+    if (Directory.Exists(music)) Directory.Delete(music, true);
+    Directory.CreateDirectory(music);
+    monitor.GetType().GetMethod("Start")!.Invoke(monitor, ["Downloading test songs", music, Array.Empty<string>(), form]);
+    var note = monitor.GetType().GetMethod("NoteLog")!;
+    note.Invoke(monitor, ["Download queue: 3 song(s)."]);
+    for (var i = 1; i <= 3; i++) note.Invoke(monitor, ["Processing query: https://open.spotify.com/track/" + i.ToString("D22")]);
+    var part = Path.Combine(music, "abc.webm.part");
+    using (var stream = new FileStream(part, FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
+    {
+        var chunk = new byte[256 * 1024];
+        for (var k = 0; k < 8; k++) { stream.Write(chunk); stream.Flush(); var until = DateTime.Now.AddMilliseconds(260); while (DateTime.Now < until) { Application.DoEvents(); Thread.Sleep(10); } }
+    }
+    File.WriteAllBytes(Path.Combine(music, "The Midnight - Track 1.opus"), new byte[3 * 1024 * 1024]);
+    var settleUntil = DateTime.Now.AddSeconds(2.5);
+    while (DateTime.Now < settleUntil) { Application.DoEvents(); Thread.Sleep(20); }
+    T Prop<T>(string name) => (T)monitor.GetType().GetProperty(name)!.GetValue(monitor)!;
+    if (Prop<long>("Downloaded") < 1024 * 1024) throw new InvalidOperationException($"The graph did not measure the growing download ({Prop<long>("Downloaded")} bytes).");
+    if (Prop<int>("Done") != 1 || Prop<int?>("Target") != 3) throw new InvalidOperationException($"Song counts are wrong (done {Prop<int>("Done")}, queue {Prop<int?>("Target")}).");
+    if (!Prop<string>("CurrentName").Contains("Track 2")) throw new InvalidOperationException("The current song is wrong: " + Prop<string>("CurrentName"));
+    using (var shot = new Bitmap(form.ClientSize.Width, form.ClientSize.Height)) { form.DrawToBitmap(shot, form.ClientRectangle); shot.Save(Path.Combine(output, "console-split-live.png"), System.Drawing.Imaging.ImageFormat.Png); }
+    Invoke(form, "SetConsoleSplit", false);
+    Invoke(form, "SelectPage", 0);
+    Application.DoEvents(); LayoutAll(form);
+    using (var shot = new Bitmap(form.ClientSize.Width, form.ClientSize.Height)) { form.DrawToBitmap(shot, form.ClientRectangle); shot.Save(Path.Combine(output, "dashboard-live.png"), System.Drawing.Imaging.ImageFormat.Png); }
+
+    // full-screen window (opened off-screen with the test form) and closed again
+    Invoke(form, "OpenActivityFullScreen");
+    var window = (Form)GetField(form, "activityWindow");
+    Application.DoEvents(); LayoutAll(window); Application.DoEvents();
+    using (var shot = new Bitmap(Math.Max(1, window.ClientSize.Width), Math.Max(1, window.ClientSize.Height))) { window.DrawToBitmap(shot, window.ClientRectangle); shot.Save(Path.Combine(output, "activity-fullscreen.png"), System.Drawing.Imaging.ImageFormat.Png); }
+    window.Close();
+    monitor.GetType().GetMethod("Stop")!.Invoke(monitor, null);
+    try { Directory.Delete(music, true); } catch { }
+
+    settings.UiDashboardCards = "";
+    Invoke(form, "ApplyDashboardLayout");
+    Console.WriteLine("live features ok (drag into column, minimize, full console, status names, library select, console split, live graph, full screen)");
 }

@@ -82,6 +82,23 @@ public sealed class SpotySyncService : IDisposable
         return prepared.Plan;
     }
 
+    /// <summary>Compares a loaded library with the disk (safe to run on a worker thread; changes nothing).</summary>
+    public Task<(List<LocalTrack> Added, List<LocalTrack> Removed)> CompareLibraryWithDiskAsync(IReadOnlyCollection<LocalTrack> library, CancellationToken cancellationToken = default)
+        => scanner.ReconcileAsync(library, cancellationToken);
+
+    /// <summary>Applies <see cref="CompareLibraryWithDiskAsync"/> results to a preview and optionally rebuilds its plan.</summary>
+    public void ApplyLibraryChanges(PreparedSync prepared, IReadOnlyCollection<LocalTrack> added, IReadOnlyCollection<LocalTrack> removed, bool rebuildPlan)
+    {
+        if (added.Count == 0 && removed.Count == 0) return;
+        var gone = new HashSet<string>(removed.Select(x => SyncPlanner.PathKey(x.Path)), StringComparer.OrdinalIgnoreCase);
+        var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        prepared.Library = prepared.Library.Where(track => !gone.Contains(SyncPlanner.PathKey(track.Path)))
+            .Concat(added)
+            .Where(track => present.Add(SyncPlanner.PathKey(track.Path)))
+            .ToList();
+        if (rebuildPlan) RebuildPlan(prepared);
+    }
+
     public int AddSyncExclusions(IEnumerable<SyncExclusion> items) => exclusions.Add(items);
     public int RemoveSyncExclusions(IEnumerable<SyncExclusion> items) => exclusions.Remove(items);
     public IReadOnlyList<SyncExclusion> LoadSyncExclusions() => exclusions.Load();
@@ -303,6 +320,7 @@ public sealed class SpotySyncService : IDisposable
             !value.StartsWith("spotify:", StringComparison.OrdinalIgnoreCase) &&
             (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")));
         if (invalid is not null) return new ManualDownloadResult { Error = "This is not a supported link: " + invalid };
+        log($"Download queue: {urls.Count} song(s).");
         if (urls.Count <= DownloadBatchSize) return await DownloadLinkBatchAsync(urls, cancellationToken);
 
         var batches = urls.Chunk(DownloadBatchSize).ToList();
@@ -312,6 +330,7 @@ public sealed class SpotySyncService : IDisposable
         var troubledBatches = 0;
         for (var i = 0; i < batches.Count; i++)
         {
+            await DownloadProcesses.WaitIfPausedAsync(cancellationToken); // a paused run starts no new batch
             cancellationToken.ThrowIfCancellationRequested();
             log($"Batch {i + 1} of {batches.Count} ({total.NewAudioFiles} new song(s) so far)…");
             var part = await DownloadLinkBatchAsync(batches[i].ToList(), cancellationToken);

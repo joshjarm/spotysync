@@ -69,6 +69,26 @@ internal sealed class InsightTable : Control
         }
     }
 
+    /// <summary>
+    /// Swaps in a refreshed list without disturbing the view: scroll position, the highlighted rows and the
+    /// current row are kept (matched by <paramref name="key"/>), so live library updates don't jump around.
+    /// </summary>
+    public void ReplaceItems(IReadOnlyList<InsightRow> rows, Func<InsightRow, string> key)
+    {
+        var selectedKeys = selected.Where(i => i < items.Count).Select(i => key(items[i])).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var currentKey = CurrentItem is { } c ? key(c) : null;
+        var keep = offset;
+        items = rows; selected.Clear(); current = anchor = hover = -1; ClearRowCache();
+        for (var i = 0; i < items.Count; i++)
+        {
+            var k = key(items[i]);
+            if (selectedKeys.Contains(k)) selected.Add(i);
+            if (currentKey is not null && k.Equals(currentKey, StringComparison.OrdinalIgnoreCase)) current = anchor = i;
+        }
+        offset = Math.Clamp(keep, 0, MaxOffset);
+        UpdateBar(); Invalidate(); SelectionChanged?.Invoke();
+    }
+
     public InsightRow? CurrentItem => current >= 0 && current < items.Count ? items[current] : null;
     public int SelectedCount => selected.Count;
     public List<InsightRow> SelectedItems => selected.OrderBy(i => i).Where(i => i < items.Count).Select(i => items[i]).ToList();

@@ -15,6 +15,8 @@ internal static class CrossFade
 
     public static void Run(Control host, Action change, double seconds = 0.22)
     {
+        // some containers (SplitContainer, …) refuse extra children: fade in the nearest parent that accepts one
+        while (host.Controls.IsReadOnly && host.Parent is not null) host = host.Parent;
         var form = host.FindForm();
         if (!Theme.Animations || form is null || !form.Visible || form.WindowState == FormWindowState.Minimized ||
             !host.IsHandleCreated || host.Width < 4 || host.Height < 4 || form.Location.X < -10000)
@@ -35,7 +37,11 @@ internal static class CrossFade
 
         var layer = new FadeLayer(host.ClientSize) { Bounds = host.ClientRectangle };
         if (!layer.CaptureOld(host.RectangleToScreen(host.ClientRectangle))) { layer.Dispose(); change(); return; }
-        host.Controls.Add(layer);
+        try { host.Controls.Add(layer); }
+        catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or ArgumentException)
+        {
+            layer.Dispose(); change(); return; // no fade is better than no change
+        }
         layer.BringToFront();
         layer.Update(); // the old look is on screen before anything underneath changes
         active = layer;

@@ -5,6 +5,7 @@ obj/
 .build-cache/
 build-cache/
 dist/
+
 *.user
 
 # Runtime data: settings, Spotify login, logs, caches (contain personal info)

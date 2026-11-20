@@ -17,7 +17,8 @@ internal static class Glyph
         Tools = "", List = "", Layout = "", Undo = "", Stop = "", Clock = "",
         Grid = "", Pin = "", Dice = "", Text = "", Database = "", Back = "",
         ChevronRight = "", ChevronLeft = "", Collapse = "", Expand = "", Add = "",
-        Remove = "", CircleRing = "", Lock = "", Spotify = "";
+        Remove = "", CircleRing = "", Lock = "", Spotify = "",
+        Pause = "", Minimize = "", Restore = "", Split = "";
 }
 
 /// <summary>Font factory that follows the user's font choice and falls back gracefully.</summary>
@@ -492,12 +493,44 @@ internal class Card : Panel
 {
     private string title = "", eyebrow = "", glyph = "";
     private bool menuHover;
+    private int actionHover = -1;
+    private bool minimized, lifted;
+    private static readonly ToolTip ActionTips = Ui.ToolTip();
     public int Radius { get; set; } = 14;
     public bool Raised { get; set; }
     public Color? AccentEdge { get; set; }
     public ContextMenuStrip? HeaderMenu { get; set; }
     /// <summary>Shows a resize grip in the bottom-right corner (dashboard modules).</summary>
     public bool Resizable { get; set; }
+
+    /// <summary>A small icon button in the header, left of the "…" menu (minimize, full screen…).</summary>
+    public sealed class HeaderAction
+    {
+        public string Glyph = "";
+        public string Tip = "";
+        public Action? Click;
+    }
+
+    /// <summary>Header buttons, right to left.</summary>
+    public List<HeaderAction> HeaderActions { get; } = new();
+
+    /// <summary>Only the header is shown (dashboard modules); the body is hidden until restored.</summary>
+    public bool Minimized
+    {
+        get => minimized;
+        set
+        {
+            if (minimized == value) return;
+            minimized = value;
+            foreach (Control child in Controls) child.Visible = !value;
+            Invalidate();
+        }
+    }
+
+    public int MinimizedHeight => HeaderHeight + 2;
+
+    /// <summary>Being dragged: drawn with a strong accent border.</summary>
+    public bool Lifted { get => lifted; set { if (lifted != value) { lifted = value; Invalidate(); } } }
 
     // ---- hover highlight (dashboard modules): the border eases to the accent while the mouse is anywhere over the card
     private bool hoverHighlight;
@@ -530,8 +563,10 @@ internal class Card : Panel
         // leaving a child into another child isn't leaving the card
         if (!RectangleToScreen(ClientRectangle).Contains(Cursor.Position)) hoverTween?.To(0);
     }
-    public Rectangle GripBounds => new(Width - 22, Height - 22, 20, 20);
+    public Rectangle GripBounds => minimized ? Rectangle.Empty : new(Width - 22, Height - 22, 20, 20);
     public event MouseEventHandler? HeaderMouseDown;
+    /// <summary>Double-click on the header (outside its buttons).</summary>
+    public event Action? HeaderDoubleClick;
 
     public string Title { get => title; set { title = value; UpdatePadding(); Invalidate(); } }
     public string Eyebrow { get => eyebrow; set { eyebrow = value; UpdatePadding(); Invalidate(); } }
@@ -551,7 +586,21 @@ internal class Card : Panel
 
     public void UpdatePadding() => Padding = new Padding(Inner.Left, HeaderHeight + Inner.Top, Inner.Right, Inner.Bottom);
 
-    private Rectangle MenuBounds => new(Width - 40, 10, 28, 28);
+    private Rectangle MenuBounds => HeaderMenu is null ? Rectangle.Empty : new(Width - 40, 10, 28, 28);
+
+    private Rectangle ActionBounds(int index) => new(Width - 40 - (HeaderMenu is null ? 0 : 30) - index * 30, 10, 28, 28);
+
+    /// <summary>Left edge of the header buttons (the title and the drag area end here).</summary>
+    public int HeaderButtonsLeft => HeaderActions.Count > 0 ? ActionBounds(HeaderActions.Count - 1).Left : HeaderMenu is not null ? MenuBounds.Left : Width - 8;
+
+    private int ActionAt(Point point)
+    {
+        for (var i = 0; i < HeaderActions.Count; i++) if (ActionBounds(i).Contains(point)) return i;
+        return -1;
+    }
+
+    /// <summary>True when <paramref name="point"/> is on the header but not on one of its buttons.</summary>
+    public bool IsDragArea(Point point) => point.Y < HeaderHeight && point.X < HeaderButtonsLeft - 2;
 
     protected override void OnPaintBackground(PaintEventArgs e)
     {
@@ -566,8 +615,8 @@ internal class Card : Panel
         {
             using var brush = new SolidBrush(fill);
             g.FillPath(brush, path);
-            var h = hoverTween?.Eased ?? 0f;
-            using var pen = new Pen(h > 0.01f ? ColorX.Mix(p.Line, p.Accent, 0.75 * h) : p.Line, 1f + h * 0.6f);
+            var h = lifted ? 1f : hoverTween?.Eased ?? 0f;
+            using var pen = new Pen(h > 0.01f ? ColorX.Mix(p.Line, p.Accent, lifted ? 1 : 0.75 * h) : p.Line, lifted ? 2.2f : 1f + h * 0.6f);
             g.DrawPath(pen, path);
         }
         if (AccentEdge is { } edge)
@@ -578,19 +627,27 @@ internal class Card : Panel
         if (title.Length == 0) return;
         var x = Inner.Left;
         var titleTop = eyebrow.Length > 0 ? 28 : 12;
+        var textRight = HeaderButtonsLeft - 6;
         if (eyebrow.Length > 0)
-            Ui.Text(g, eyebrow.ToUpperInvariant(), Fonts.Mono(7.75f, FontStyle.Bold), new Rectangle(x, 10, Width - x - 48, 18), p.Accent2);
+            Ui.Text(g, eyebrow.ToUpperInvariant(), Fonts.Mono(7.75f, FontStyle.Bold), new Rectangle(x, 10, Math.Max(10, textRight - x), 18), p.Accent2);
         if (glyph.Length > 0)
         {
             Ui.DrawGlyph(g, glyph, 12f, p.Accent, new Rectangle(x - 2, titleTop, 22, 24));
             x += 26;
         }
-        Ui.Text(g, title, Fonts.Display(13.5f), new Rectangle(x, titleTop - 1, Width - x - 48, 26), p.Ink);
+        Ui.Text(g, title, Fonts.Display(13.5f), new Rectangle(x, titleTop - 1, Math.Max(10, textRight - x), 26), p.Ink);
+        for (var i = 0; i < HeaderActions.Count; i++)
+        {
+            var r = ActionBounds(i);
+            if (actionHover == i) Ui.FillRound(g, p.Hover, r, Theme.R(7));
+            Ui.DrawGlyph(g, HeaderActions[i].Glyph, 9.5f, actionHover == i ? p.Ink : p.Dim, r);
+        }
         if (HeaderMenu is not null)
         {
             if (menuHover) Ui.FillRound(g, p.Hover, MenuBounds, Theme.R(7));
             Ui.DrawGlyph(g, Glyph_More, 10f, menuHover ? p.Ink : p.Dim, MenuBounds);
         }
+        if (minimized) return;
         using var line = new Pen(ColorX.Mix(p.Line, fill, 0.35));
         g.DrawLine(line, Inner.Left, HeaderHeight - 1, Width - Inner.Right, HeaderHeight - 1);
         if (Resizable)
@@ -608,18 +665,48 @@ internal class Card : Panel
     {
         var hover = HeaderMenu is not null && MenuBounds.Contains(e.Location);
         if (hover != menuHover) { menuHover = hover; Invalidate(MenuBounds); }
-        Cursor = hover ? Cursors.Hand : Resizable && GripBounds.Contains(e.Location) ? Cursors.SizeNWSE
-            : e.Y < HeaderHeight && HeaderMouseDown is not null ? Cursors.SizeAll : Cursors.Default;
+        var action = ActionAt(e.Location);
+        if (action != actionHover)
+        {
+            if (actionHover >= 0) Invalidate(ActionBounds(actionHover));
+            actionHover = action;
+            if (action >= 0)
+            {
+                var r = ActionBounds(action);
+                Invalidate(r);
+                ActionTips.Show(HeaderActions[action].Tip, this, r.Left, r.Bottom + 4, 2500);
+            }
+            else ActionTips.Hide(this);
+        }
+        Cursor = hover || action >= 0 ? Cursors.Hand : Resizable && GripBounds.Contains(e.Location) ? Cursors.SizeNWSE
+            : IsDragArea(e.Location) && HeaderMouseDown is not null ? Cursors.SizeAll : Cursors.Default;
         base.OnMouseMove(e);
     }
 
-    protected override void OnMouseLeave(EventArgs e) { if (menuHover) { menuHover = false; Invalidate(MenuBounds); } base.OnMouseLeave(e); }
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        if (menuHover) { menuHover = false; Invalidate(MenuBounds); }
+        if (actionHover >= 0) { Invalidate(ActionBounds(actionHover)); actionHover = -1; ActionTips.Hide(this); }
+        base.OnMouseLeave(e);
+    }
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
         if (HeaderMenu is not null && MenuBounds.Contains(e.Location)) { HeaderMenu.Show(this, new Point(MenuBounds.Right - 4, MenuBounds.Bottom)); return; }
+        var action = ActionAt(e.Location);
+        if (action >= 0)
+        {
+            if (e.Button == MouseButtons.Left) { ActionTips.Hide(this); HeaderActions[action].Click?.Invoke(); }
+            return;
+        }
         if (e.Y < HeaderHeight) HeaderMouseDown?.Invoke(this, e);
         base.OnMouseDown(e);
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        base.OnMouseDoubleClick(e);
+        if (e.Button == MouseButtons.Left && IsDragArea(e.Location)) HeaderDoubleClick?.Invoke();
     }
 }
 
@@ -698,59 +785,50 @@ internal class VStack : Panel, IHeightForWidth
 
 internal interface IHideable { bool IsHidden { get; } }
 
-/// <summary>Responsive card grid: 1–3 columns depending on width; cards may span columns.</summary>
+/// <summary>
+/// Responsive dashboard grid: 1–3 columns depending on width. Every card has a column (<see cref="Cols"/>) and a
+/// vertical order (<see cref="Orders"/>, its centre in layout pixels); cards are stacked in each column in that
+/// order, so "put this one under that one" is simply a column + order. Dragging moves the real card under the
+/// cursor while the other cards slide out of the way live; an outline shows where it will land.
+/// </summary>
 internal sealed class CardGrid : Panel
 {
     /// <summary>Set before a user-driven layout change: modules then glide to their new places.</summary>
     public bool AnimateNextLayout { get; set; }
     private bool inGlideStep;            // true only while a glide frame moves the cards
     private Action<double>? glideFrame;  // the running glide, if any
-
-    private void StopGlide()
-    {
-        if (glideFrame is not null) { FrameClock.Unsubscribe(glideFrame); glideFrame = null; }
-    }
-
-    /// <summary>Moves cards from where they are now to their targets (a new layout mid-glide simply re-targets).</summary>
-    private void Glide(List<(Control Child, Rectangle To)> targets)
-    {
-        StopGlide();
-        var moves = targets.Select(t => (t.Child, From: t.Child.Visible && t.Child.Width > 0 ? t.Child.Bounds : t.To, t.To)).ToList();
-        var elapsed = 0.0;
-        void Frame(double dt)
-        {
-            elapsed += dt;
-            var t = Math.Clamp(elapsed / 0.22, 0, 1);
-            var e = 1 - Math.Pow(1 - t, 3);
-            inGlideStep = true;
-            try
-            {
-                foreach (var (child, from, to) in moves)
-                {
-                    int L(int a, int b) => (int)Math.Round(a + (b - a) * e);
-                    child.SetBounds(L(from.X, to.X), L(from.Y, to.Y), L(from.Width, to.Width), L(from.Height, to.Height));
-                }
-            }
-            finally { inGlideStep = false; }
-            if (t >= 1) StopGlide();
-        }
-        glideFrame = Frame;
-        FrameClock.Subscribe(this, Frame);
-    }
+    private Dictionary<Control, Rectangle> glideTargets = new();
 
     public int Gap { get; set; } = 14;
     public int MinColumnWidth { get; set; } = 330;
     public int MaxColumns { get; set; } = 3;
+    public int MinCardHeight { get; set; } = 180;
+    public int MaxCardHeight { get; set; } = 900;
+    public int HeightSnap { get; set; } = 20;
     public Dictionary<Control, int> Spans { get; } = new();
     public Dictionary<Control, int> Heights { get; } = new();
+    /// <summary>Column of each card's left edge.</summary>
+    public Dictionary<Control, int> Cols { get; } = new();
+    /// <summary>Vertical order of each card (its centre, in layout pixels).</summary>
+    public Dictionary<Control, double> Orders { get; } = new();
+
+    // gesture state
+    private Control? lifted;
+    private bool resizeMode;
+    private Point grab;                       // move: cursor offset in the card; resize: offset from the bottom-right corner
+    private Dictionary<Control, double> frozenOrders = new();
+    private (int Col, double Order, int Span, int Height) liftedTarget;
+    private Rectangle placeholder = Rectangle.Empty;
 
     public CardGrid()
     {
-        SetStyle(ControlStyles.SupportsTransparentBackColor | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+        SetStyle(ControlStyles.SupportsTransparentBackColor | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
         BackColor = Color.Transparent;
         AutoScroll = true;
         DoubleBuffered = true;
     }
+
+    public bool Gesturing => lifted is not null;
 
     private SmoothScroller? smooth;
 
@@ -767,53 +845,257 @@ internal sealed class CardGrid : Panel
 
     public int Columns => Math.Clamp((ClientSize.Width - Padding.Horizontal + Gap) / (MinColumnWidth + Gap), 1, MaxColumns);
 
-    protected override void OnLayout(LayoutEventArgs levent)
+    private double ColWidth(int columns) => (ClientSize.Width - Padding.Horizontal - Gap * (columns - 1)) / (double)columns;
+
+    private int Origin => Padding.Top + AutoScrollPosition.Y;
+
+    private int CardHeight(Control c) => c is Card { Minimized: true } card ? card.MinimizedHeight : Heights.TryGetValue(c, out var h) ? h : c.Height;
+
+    private int SpanOf(Control c, int columns) => Math.Clamp(Spans.TryGetValue(c, out var s) ? s : 1, 1, columns);
+
+    // ---------------------------------------------------------------- glide
+    private void StopGlide()
     {
-        var width = ClientSize.Width - Padding.Horizontal;
-        if (width <= 0) return;
+        if (glideFrame is not null) { FrameClock.Unsubscribe(glideFrame); glideFrame = null; }
+    }
+
+    /// <summary>Moves cards from where they are now to their targets (a new target mid-glide simply re-targets).</summary>
+    private void Glide(Dictionary<Control, Rectangle> targets)
+    {
+        StopGlide();
+        glideTargets = targets;
+        var moves = targets.Select(t => (Child: t.Key, From: t.Key.Visible && t.Key.Width > 0 ? t.Key.Bounds : t.Value, To: t.Value)).ToList();
+        var elapsed = 0.0;
+        void Frame(double dt)
+        {
+            elapsed += dt;
+            var t = Math.Clamp(elapsed / 0.2, 0, 1);
+            var e = 1 - Math.Pow(1 - t, 3);
+            inGlideStep = true;
+            try
+            {
+                foreach (var (child, from, to) in moves)
+                {
+                    if (child == lifted) continue;
+                    int L(int a, int b) => (int)Math.Round(a + (b - a) * e);
+                    var r = new Rectangle(L(from.X, to.X), L(from.Y, to.Y), L(from.Width, to.Width), L(from.Height, to.Height));
+                    if (child.Bounds != r) child.SetBounds(r.X, r.Y, r.Width, r.Height);
+                }
+            }
+            finally { inGlideStep = false; }
+            if (t >= 1) StopGlide();
+        }
+        glideFrame = Frame;
+        FrameClock.Subscribe(this, Frame);
+    }
+
+    // ---------------------------------------------------------------- arrangement
+    /// <summary>Target rectangle of every visible card; <paramref name="extra"/> places the lifted card at a candidate spot.</summary>
+    private Dictionary<Control, Rectangle> Arrange(IReadOnlyDictionary<Control, double> orders, (Control Card, int Col, double Order, int Span, int Height)? extra, out int bottom)
+    {
         var columns = Columns;
-        var colWidth = (width - Gap * (columns - 1)) / (double)columns;
-        if (inGlideStep) return; // card moves made by a glide frame must not re-trigger layout
-        var origin = Padding.Top + AutoScrollPosition.Y;
-        var targets = new List<(Control Child, Rectangle To)>();
-        // Dense packing: each card goes to the highest free spot (in column units) that fits it, so a
-        // narrow window back-fills holes instead of leaving gaps beside short cards.
-        var placed = new List<(int Col, int Span, int Top, int Bottom)>();
-        var bottom = 0;
+        var colWidth = ColWidth(columns);
+        var items = new List<(Control C, int Col, int Span, int H, double Key, int Index)>();
+        var index = 0;
         foreach (Control child in Controls)
         {
+            index++;
             if (!child.Visible) continue;
-            var span = Math.Clamp(Spans.TryGetValue(child, out var s) ? s : 1, 1, columns);
-            var w = (int)Math.Round(span * colWidth + (span - 1) * Gap);
-            var h = child is IHeightForWidth hw ? hw.HeightFor(w) : Heights.TryGetValue(child, out var fixedHeight) ? fixedHeight : child.Height;
-            var candidates = placed.Select(p => p.Bottom + Gap).Prepend(0).Distinct().OrderBy(y => y);
+            if (extra is { } x && x.Card == child)
+            {
+                var span = Math.Clamp(x.Span, 1, columns);
+                items.Add((child, Math.Clamp(x.Col, 0, columns - span), span, x.Height, x.Order, index));
+                continue;
+            }
+            var s = SpanOf(child, columns);
+            var col = Math.Clamp(Cols.TryGetValue(child, out var c) ? c : 0, 0, columns - s);
+            items.Add((child, col, s, CardHeight(child), orders.TryGetValue(child, out var o) ? o : 1e9 + index, index));
+        }
+        var colBottom = new int[columns];
+        var result = new Dictionary<Control, Rectangle>();
+        foreach (var item in items.OrderBy(i => i.Key).ThenBy(i => i.Col).ThenBy(i => i.Index))
+        {
+            var top = 0;
+            for (var k = item.Col; k < item.Col + item.Span; k++) top = Math.Max(top, colBottom[k]);
+            var w = (int)Math.Round(item.Span * colWidth + (item.Span - 1) * Gap);
+            var x = Padding.Left + (int)Math.Round(item.Col * (colWidth + Gap));
+            result[item.C] = new Rectangle(x, Origin + top, w, item.H);
+            for (var k = item.Col; k < item.Col + item.Span; k++) colBottom[k] = top + item.H + Gap;
+        }
+        bottom = colBottom.Length == 0 ? 0 : colBottom.Max();
+        return result;
+    }
+
+    /// <summary>Cards without a saved position (older layouts) are packed into the highest free spots, in order.</summary>
+    private void EnsurePositions()
+    {
+        var missing = Controls.Cast<Control>().Where(c => c.Visible && (!Cols.ContainsKey(c) || !Orders.ContainsKey(c))).ToList();
+        if (missing.Count == 0) return;
+        var columns = Columns;
+        var placed = Controls.Cast<Control>().Where(c => c.Visible && !missing.Contains(c))
+            .Select(c => (Col: Math.Clamp(Cols[c], 0, columns - SpanOf(c, columns)), Span: SpanOf(c, columns), Top: (int)(Orders[c] - CardHeight(c) / 2.0), Bottom: (int)(Orders[c] + CardHeight(c) / 2.0)))
+            .ToList();
+        foreach (var child in missing)
+        {
+            var span = SpanOf(child, columns);
+            var h = CardHeight(child);
             int bestCol = 0, bestTop = 0;
             var found = false;
-            foreach (var y in candidates)
+            foreach (var y in placed.Select(p => p.Bottom + Gap).Prepend(0).Distinct().OrderBy(v => v))
             {
                 for (var c = 0; c + span <= columns && !found; c++)
                 {
-                    var free = placed.All(p => p.Col + p.Span <= c || c + span <= p.Col || p.Bottom + Gap <= y || y + h + Gap <= p.Top);
-                    if (free) { bestCol = c; bestTop = y; found = true; }
+                    if (placed.All(p => p.Col + p.Span <= c || c + span <= p.Col || p.Bottom + Gap <= y || y + h + Gap <= p.Top)) { bestCol = c; bestTop = y; found = true; }
                 }
                 if (found) break;
             }
             placed.Add((bestCol, span, bestTop, bestTop + h));
-            bottom = Math.Max(bottom, bestTop + h + Gap);
-            var x = Padding.Left + (int)Math.Round(bestCol * (colWidth + Gap));
-            targets.Add((child, new Rectangle(x, origin + bestTop, w, h)));
+            Cols[child] = bestCol;
+            Orders[child] = bestTop + h / 2.0;
         }
+    }
+
+    protected override void OnLayout(LayoutEventArgs levent)
+    {
+        if (inGlideStep || ClientSize.Width - Padding.Horizontal <= 0) return;
+        if (lifted is not null) { RearrangeAround(false); base.OnLayout(levent); return; }
+        EnsurePositions();
+        var targets = Arrange(Orders, null, out var bottom);
+        // keep the order keys in step with where the cards really are
+        foreach (var (child, r) in targets) Orders[child] = r.Y - Origin + r.Height / 2.0;
         var animate = AnimateNextLayout && Theme.Animations && IsHandleCreated && Visible;
         AnimateNextLayout = false;
         if (animate) Glide(targets);
         else
         {
             StopGlide();
-            foreach (var (child, to) in targets) child.SetBounds(to.X, to.Y, to.Width, to.Height);
+            foreach (var (child, to) in targets) if (child.Bounds != to) child.SetBounds(to.X, to.Y, to.Width, to.Height);
         }
         var total = bottom + Padding.Vertical;
         if (AutoScrollMinSize.Height != total) AutoScrollMinSize = new Size(0, total);
         base.OnLayout(levent); // shows/sizes the scrollbars
+    }
+
+    // ---------------------------------------------------------------- gestures
+    public void BeginMove(Control card, Point grabInCard) => Begin(card, false, grabInCard);
+
+    public void BeginResize(Control card, Point cursorInCard) => Begin(card, true, new Point(card.Width - cursorInCard.X, card.Height - cursorInCard.Y));
+
+    private void Begin(Control card, bool resize, Point offset)
+    {
+        StopGlide();
+        if (glideTargets.Count > 0) foreach (var (c, r) in glideTargets) if (c.Bounds != r) c.Bounds = r; // finish a running glide instantly
+        lifted = card; resizeMode = resize; grab = offset;
+        frozenOrders = new Dictionary<Control, double>(Orders);
+        var columns = Columns;
+        liftedTarget = (Math.Clamp(Cols.TryGetValue(card, out var c0) ? c0 : 0, 0, columns - SpanOf(card, columns)), Orders.TryGetValue(card, out var o) ? o : 0, SpanOf(card, columns), CardHeight(card));
+        card.BringToFront();
+        if (card is Card lift) lift.Lifted = true;
+    }
+
+    /// <summary>Follows the cursor (grid client coordinates); call every frame while the button is held.</summary>
+    public void DragTo(Point cursor)
+    {
+        var card = lifted;
+        if (card is null) return;
+        // scroll when the cursor is near the top or bottom edge
+        var edge = 36;
+        var scroll = cursor.Y < edge ? -Math.Min(24, (edge - cursor.Y) / 2 + 4) : cursor.Y > ClientSize.Height - edge ? Math.Min(24, (cursor.Y - ClientSize.Height + edge) / 2 + 4) : 0;
+        if (scroll != 0 && VerticalScroll.Visible)
+        {
+            var max = Math.Max(0, DisplayRectangle.Height - ClientSize.Height);
+            var next = Math.Clamp(-AutoScrollPosition.Y + scroll, 0, max);
+            if (next != -AutoScrollPosition.Y) { inGlideStep = true; try { AutoScrollPosition = new Point(0, next); } finally { inGlideStep = false; } }
+        }
+        var columns = Columns;
+        var colWidth = ColWidth(columns);
+        if (!resizeMode)
+        {
+            var x = Math.Clamp(cursor.X - grab.X, 0, Math.Max(0, ClientSize.Width - card.Width));
+            var y = Math.Max(Origin - 20, cursor.Y - grab.Y);
+            inGlideStep = true;
+            try { card.Location = new Point(x, y); } finally { inGlideStep = false; }
+            var span = SpanOf(card, columns);
+            var col = Math.Clamp((int)Math.Round((x - Padding.Left) / (colWidth + Gap)), 0, columns - span);
+            // the dragged card goes above another card once its top edge is above that card's middle
+            liftedTarget = (col, y - Origin + 1, span, liftedTarget.Height);
+        }
+        else
+        {
+            var right = cursor.X + grab.X; var bottomEdge = cursor.Y + grab.Y;
+            var w = Math.Clamp(right - card.Left, (int)(colWidth * 0.6), ClientSize.Width - Padding.Right - card.Left);
+            var h = Math.Clamp(bottomEdge - card.Top, MinCardHeight - 30, MaxCardHeight + 30);
+            inGlideStep = true;
+            try { card.Size = new Size(w, h); } finally { inGlideStep = false; }
+            var col = liftedTarget.Col;
+            var span = Math.Clamp((int)Math.Round((w + Gap) / (colWidth + Gap)), 1, columns - col);
+            var snapped = Math.Clamp((int)Math.Round(h / (double)HeightSnap) * HeightSnap, MinCardHeight, MaxCardHeight);
+            liftedTarget = (col, liftedTarget.Order, span, snapped);
+        }
+        RearrangeAround(true);
+    }
+
+    private void RearrangeAround(bool animate)
+    {
+        var card = lifted;
+        if (card is null) return;
+        var targets = Arrange(frozenOrders, (card, liftedTarget.Col, liftedTarget.Order, liftedTarget.Span, liftedTarget.Height), out var bottom);
+        if (targets.TryGetValue(card, out var spot) && spot != placeholder)
+        {
+            var old = placeholder;
+            placeholder = spot;
+            Invalidate(Rectangle.Inflate(old, 4, 4)); Invalidate(Rectangle.Inflate(spot, 4, 4));
+        }
+        var others = targets.Where(t => t.Key != card).ToDictionary(t => t.Key, t => t.Value);
+        var changed = others.Any(t => !glideTargets.TryGetValue(t.Key, out var r) || r != t.Value) || others.Count != glideTargets.Count(t => t.Key != card);
+        if (changed)
+        {
+            if (animate && Theme.Animations) Glide(others);
+            else foreach (var (c, r) in others) { inGlideStep = true; try { c.Bounds = r; } finally { inGlideStep = false; } }
+            glideTargets = others;
+        }
+        var total = Math.Max(bottom, card.Bottom - Origin + Gap) + Padding.Vertical;
+        if (AutoScrollMinSize.Height < total) AutoScrollMinSize = new Size(0, total);
+    }
+
+    /// <summary>Drops the lifted card on its spot. Returns its new column / span / height (null when nothing was lifted).</summary>
+    public (int Col, int Span, int Height)? EndGesture()
+    {
+        var card = lifted;
+        if (card is null) return null;
+        var target = liftedTarget;
+        Cols[card] = target.Col;
+        if (resizeMode)
+        {
+            Spans[card] = target.Span >= Columns && Spans.TryGetValue(card, out var oldSpan) && oldSpan > Columns ? oldSpan : target.Span; // keep "full width" on a narrow window
+            Heights[card] = target.Height;
+        }
+        Orders.Clear();
+        foreach (var (c, o) in frozenOrders) Orders[c] = o;
+        Orders[card] = target.Order;
+        lifted = null;
+        if (card is Card lift) lift.Lifted = false;
+        var old = placeholder;
+        placeholder = Rectangle.Empty;
+        Invalidate(Rectangle.Inflate(old, 4, 4));
+        glideTargets = new();
+        AnimateNextLayout = true;
+        PerformLayout();
+        return (target.Col, target.Span, target.Height);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        if (placeholder.IsEmpty) return;
+        var p = Theme.P;
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        var r = new RectangleF(placeholder.X + 1.5f, placeholder.Y + 1.5f, placeholder.Width - 3, placeholder.Height - 3);
+        using var path = Ui.Rounded(r, Theme.R(14));
+        using (var fill = new SolidBrush(ColorX.Alpha(p.Accent, 26))) g.FillPath(fill, path);
+        using var pen = new Pen(ColorX.Alpha(p.Accent, 200), 2f) { DashStyle = DashStyle.Dash };
+        g.DrawPath(pen, path);
     }
 }
 

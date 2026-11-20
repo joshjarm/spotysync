@@ -100,6 +100,66 @@ public sealed class LibraryScanner
         return final;
     }
 
+    /// <summary>
+    /// Brings an already-loaded library up to date with the disk without a full rescan: audio files in the music
+    /// folder that are not in <paramref name="library"/> are inspected and returned as added, and tracks whose file
+    /// no longer exists are returned as removed. Files still being written (or renamed away meanwhile) are skipped
+    /// and simply picked up next time.
+    /// </summary>
+    public async Task<(List<LocalTrack> Added, List<LocalTrack> Removed)> ReconcileAsync(IReadOnlyCollection<LocalTrack> library, CancellationToken cancellationToken = default)
+    {
+        var folder = settings.ResolvePath(settings.MusicFolder);
+        var known = new HashSet<string>(library.Select(x => SyncPlanner.PathKey(x.Path)), StringComparer.OrdinalIgnoreCase);
+        // a song only counts as removed when its drive is there (an unplugged drive must not "delete" songs)
+        var removed = library.Where(track => track.Path.Length > 0 && !File.Exists(track.Path) && DriveAvailable(track.Path)).ToList();
+        var added = new List<LocalTrack>();
+        if (!Directory.Exists(folder)) return (added, removed);
+        List<string> fresh;
+        try
+        {
+            fresh = Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories)
+                .Where(path => Extensions.Contains(Path.GetExtension(path)) && !IsPartialDownload(path) && !known.Contains(SyncPlanner.PathKey(path)))
+                .ToList();
+        }
+        catch (IOException) { return (added, removed); }
+        catch (UnauthorizedAccessException) { return (added, removed); }
+        var ffprobe = settings.ResolvePath(settings.FfprobePath);
+        foreach (var path in fresh)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var info = new FileInfo(path);
+                // a file written in the last two seconds may still be growing (ffmpeg, tag writes)
+                if (!info.Exists || info.Length == 0 || DateTime.UtcNow - info.LastWriteTimeUtc < TimeSpan.FromSeconds(2)) continue;
+                var track = File.Exists(ffprobe)
+                    ? await ProbeAsync(ffprobe, path, info.Length, info.LastWriteTimeUtc.Ticks, cancellationToken)
+                    : FromFilename(path, info.Length, info.LastWriteTimeUtc.Ticks);
+                if (File.Exists(path)) added.Add(track);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        return (added, removed);
+    }
+
+    private static bool DriveAvailable(string path)
+    {
+        try { var root = Path.GetPathRoot(Path.GetFullPath(path)); return !string.IsNullOrEmpty(root) && Directory.Exists(root); }
+        catch { return false; }
+    }
+
+    /// <summary>yt-dlp / spotDL temporary names (still downloading or about to be converted).</summary>
+    public static bool IsPartialDownload(string path)
+    {
+        var name = Path.GetFileName(path);
+        return name.EndsWith(".part", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".temp", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains(".temp.", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".ytdl", StringComparison.OrdinalIgnoreCase) ||
+               System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileNameWithoutExtension(path), @"\.f\d+$");
+    }
+
+    public static bool IsAudioFile(string path) => Extensions.Contains(Path.GetExtension(path));
+
     public static bool ContainsAudio(string folder)
     {
         try

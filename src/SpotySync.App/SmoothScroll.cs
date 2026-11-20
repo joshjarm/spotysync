@@ -85,7 +85,7 @@ internal class SmoothRichText : RichTextBox
         }
     }
 
-    private int MaxScroll
+    public int MaxScroll
     {
         get
         {

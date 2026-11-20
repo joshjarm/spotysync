@@ -68,7 +68,10 @@ var tests = new (string Name, Action Run)[]
     ("custom downloader interactive protocol", TestSpot2YtProtocol),
     ("YouTube fallback candidate safety", TestYouTubeFallbackScoring),
     ("download verification accepts title and duration", TestDownloadedTrackVerification),
-    ("M3U write, removal, and backup", TestM3uSafety)
+    ("M3U write, removal, and backup", TestM3uSafety),
+    ("downloads pause and resume their whole process tree", TestDownloadPause),
+    ("loaded library catches up with new and deleted files", TestLibraryReconcile),
+    ("console split and graph range settings round trip", TestLiveSettings)
 };
 
 var failures = new List<string>();
@@ -854,6 +857,83 @@ static void TestDownloaderOutputFolder()
         Directory.CreateDirectory(directory);
         var parsed = Downloader.ExtractOutputFolder(["download | Output folder: " + directory, "Paste Spotify link"]);
         Assert(parsed == Path.GetFullPath(directory), "spot2yt output folder was not parsed");
+    }
+    finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+}
+
+static void TestDownloadPause()
+{
+    var start = new System.Diagnostics.ProcessStartInfo("ping", "-n 30 127.0.0.1") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+    using var process = DownloadProcesses.Start(start);
+    try
+    {
+        _ = process.StandardOutput.ReadToEndAsync();
+        Thread.Sleep(300);
+        bool AllSuspended()
+        {
+            process.Refresh();
+            return process.Threads.Cast<System.Diagnostics.ProcessThread>().All(t => t.ThreadState == System.Diagnostics.ThreadState.Wait && t.WaitReason == System.Diagnostics.ThreadWaitReason.Suspended);
+        }
+        Assert(DownloadProcesses.HasRunning, "the started downloader process was not tracked");
+        DownloadProcesses.Pause();
+        Thread.Sleep(150);
+        Assert(DownloadProcesses.Paused && AllSuspended(), "Pause did not suspend the downloader process");
+        var waiting = DownloadProcesses.WaitIfPausedAsync(CancellationToken.None);
+        Assert(!waiting.IsCompleted, "a new download did not wait while paused");
+        DownloadProcesses.Resume();
+        Assert(waiting.Wait(2000), "Resume did not release a waiting download");
+        Thread.Sleep(150);
+        Assert(!DownloadProcesses.Paused && !AllSuspended(), "Resume did not resume the downloader process");
+    }
+    finally
+    {
+        DownloadProcesses.Reset();
+        try { process.Kill(true); process.WaitForExit(3000); } catch { }
+    }
+}
+
+static void TestLibraryReconcile()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "spotysync-live-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var music = Path.Combine(directory, "Songs");
+        Directory.CreateDirectory(music);
+        var kept = Path.Combine(music, "Artist A - Kept.mp3");
+        var deleted = Path.Combine(music, "Artist B - Deleted.mp3");
+        var added = Path.Combine(music, "Artist C - New Song.opus");
+        var partial = Path.Combine(music, "Artist D - Downloading.webm.part");
+        File.WriteAllBytes(kept, [1, 2, 3]);
+        File.WriteAllBytes(added, [4, 5, 6]);
+        File.WriteAllBytes(partial, [7]);
+        File.SetLastWriteTimeUtc(added, DateTime.UtcNow.AddMinutes(-1));
+        var settings = PortableSettings.Load(directory);
+        settings.MusicFolder = music;
+        settings.FfprobePath = Path.Combine(directory, "missing-ffprobe.exe"); // file names only
+        var library = new List<LocalTrack> { new() { Path = kept, Artist = "Artist A", Title = "Kept" }, new() { Path = deleted, Artist = "Artist B", Title = "Deleted" } };
+        var (newTracks, gone) = new LibraryScanner(settings).ReconcileAsync(library).GetAwaiter().GetResult();
+        Assert(newTracks.Count == 1 && newTracks[0].Path == added && newTracks[0].Title.Contains("New Song"), "a new song in the music folder was not picked up: " + string.Join(", ", newTracks.Select(t => t.Path)));
+        Assert(gone.Count == 1 && gone[0].Path == deleted, "a deleted song was not dropped");
+        Assert(LibraryScanner.IsPartialDownload(partial) && !LibraryScanner.IsPartialDownload(added), "partial downloads were not told apart from finished songs");
+        var unplugged = new List<LocalTrack> { new() { Path = @"Q:\Not\Here\song.mp3" } };
+        if (!Directory.Exists(@"Q:\"))
+            Assert(new LibraryScanner(settings).ReconcileAsync(unplugged).GetAwaiter().GetResult().Removed.Count == 0, "songs on a missing drive were treated as deleted");
+    }
+    finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+}
+
+static void TestLiveSettings()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "spotysync-live-settings-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var settings = PortableSettings.Load(directory);
+        settings.UiConsoleSplit = true; settings.UiActivityRange = 900;
+        settings.UiDashboardCards = "~console:1:300:0:150,actions:2:320:1:160";
+        settings.Save();
+        var loaded = PortableSettings.Load(directory);
+        Assert(loaded.UiConsoleSplit && loaded.UiActivityRange == 900, "console split / graph range did not round-trip");
+        Assert(loaded.UiDashboardCards == "~console:1:300:0:150,actions:2:320:1:160", "dashboard positions did not round-trip");
     }
     finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
 }
