@@ -48,7 +48,7 @@ public sealed class DownloadLinksDialog : ThemedDialog
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
         layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
-        var copy = Ui.Label("Paste one or several links. Spotify tracks/playlists use your custom spot2yt downloader; YouTube and other supported media links use the bundled yt-dlp.", "muted", Fonts.Body(9.5f), autoSize: false);
+        var copy = Ui.Label("Paste one or several links. Spotify tracks/playlists use the configured downloader (spotDL by default); YouTube and other supported media links use the bundled yt-dlp.", "muted", Fonts.Body(9.5f), autoSize: false);
         copy.Dock = DockStyle.Fill;
         layout.Controls.Add(copy, 0, 0);
         input.Dock = DockStyle.Fill;

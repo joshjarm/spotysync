@@ -10,7 +10,7 @@
     <AssemblyName>SpotySync</AssemblyName>
     <Version>1.5.0</Version>
     <Authors>SpotySync contributors</Authors>
-    <Description>Portable Spotify, MusicBee, M3U and custom spot2yt synchronization.</Description>
+    <Description>Portable Spotify, MusicBee and M3U playlist sync with spotDL downloads.</Description>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../SpotySync.Core/SpotySync.Core.csproj" />

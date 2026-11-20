@@ -11,7 +11,7 @@ public sealed class PortableSettings
     public string RedirectUri { get; set; } = "http://127.0.0.1/callback";
     public string MusicFolder { get; set; } = DefaultMusicFolder();
     public string M3uFolder { get; set; } = "Playlists";
-    public string DownloaderPath { get; set; } = @"Tools\spot2yt.exe";
+    public string DownloaderPath { get; set; } = @"Tools\spotdl.exe";
     public string FfprobePath { get; set; } = @"Tools\ffprobe.exe";
     public string MusicBeeExe { get; set; } = DefaultMusicBeePath();
     /// <summary>Parent folder for Soundtrack Saver; each soundtrack gets its own subfolder.</summary>
@@ -83,6 +83,11 @@ public sealed class PortableSettings
         settings.MusicFolder = Get(values, "Paths", "MusicFolder", settings.MusicFolder);
         settings.M3uFolder = Get(values, "Paths", "M3uFolder", settings.M3uFolder);
         settings.DownloaderPath = Get(values, "Paths", "Downloader", settings.DownloaderPath);
+        // spot2yt was a private tool that is not distributed; older settings that point at a missing
+        // spot2yt.exe use the bundled spotDL instead.
+        if (Path.GetFileName(settings.DownloaderPath).StartsWith("spot2yt", StringComparison.OrdinalIgnoreCase) &&
+            !File.Exists(settings.ResolvePath(settings.DownloaderPath)))
+            settings.DownloaderPath = @"Tools\spotdl.exe";
         settings.FfprobePath = Get(values, "Paths", "Ffprobe", settings.FfprobePath);
         settings.MusicBeeExe = Get(values, "Paths", "MusicBeeExe", settings.MusicBeeExe);
         settings.SoundtrackFolder = Get(values, "Paths", "SoundtrackFolder", settings.SoundtrackFolder);

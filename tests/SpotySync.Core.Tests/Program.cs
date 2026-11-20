@@ -64,6 +64,7 @@ var tests = new (string Name, Action Run)[]
     ("MusicBee library root detection and merge", TestLibraryRootAndMerge),
     ("custom downloader output folder detection", TestDownloaderOutputFolder),
     ("custom downloader skipped-track parsing", TestSkippedTrackParsing),
+    ("default downloader is spotDL", TestDefaultDownloader),
     ("custom downloader interactive protocol", TestSpot2YtProtocol),
     ("YouTube fallback candidate safety", TestYouTubeFallbackScoring),
     ("download verification accepts title and duration", TestDownloadedTrackVerification),
@@ -143,6 +144,22 @@ static void TestScannerRenameRace()
     }
 }
 
+static void TestDefaultDownloader()
+{
+    var root = Path.Combine(Path.GetTempPath(), "SpotySync-downloader-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(Path.Combine(root, "Tools"));
+    try
+    {
+        Assert(PortableSettings.Load(root).DownloaderPath == @"Tools\spotdl.exe", "a fresh install did not default to spotDL");
+        var ini = Path.Combine(root, "SpotySync.ini");
+        File.WriteAllText(ini, File.ReadAllText(ini).Replace(@"Downloader=Tools\spotdl.exe", @"Downloader=Tools\spot2yt.exe"));
+        Assert(PortableSettings.Load(root).DownloaderPath == @"Tools\spotdl.exe", "a missing spot2yt.exe did not fall back to spotDL");
+        File.WriteAllText(Path.Combine(root, "Tools", "spot2yt.exe"), "");
+        Assert(PortableSettings.Load(root).DownloaderPath == @"Tools\spot2yt.exe", "an installed spot2yt.exe was not kept");
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
+}
+
 static void TestSpot2YtProtocol()
 {
     var root = Path.Combine(Path.GetTempPath(), "SpotySync-protocol-" + Guid.NewGuid().ToString("N"));
@@ -158,6 +175,7 @@ static void TestSpot2YtProtocol()
         File.WriteAllText(Path.Combine(tools, "spotify_credentials.txt"),
             "SPOTIFY_CLIENT_ID=fake\nSPOTIFY_CLIENT_SECRET=fake\n");
         var settings = PortableSettings.Load(root);
+        settings.DownloaderPath = @"Tools\spot2yt.exe";
         settings.MusicFolder = music;
         settings.AutoUpdateYtDlp = false;
         settings.AutoYouTubeFallback = false;

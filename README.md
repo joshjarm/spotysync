@@ -1,6 +1,6 @@
 # SpotySync
 
-SpotySync is a portable Windows companion for keeping Spotify playlists, MusicBee static playlists, and M3U/M3U8 playlists aligned. It also backs up newly Liked Spotify tracks with the supplied custom `spot2yt` downloader and can download pasted Spotify, YouTube, and other supported media links.
+SpotySync is a portable Windows companion for keeping Spotify playlists, MusicBee static playlists, and M3U/M3U8 playlists aligned. It also backs up newly Liked Spotify tracks with the bundled spotDL downloader and can download pasted Spotify, YouTube, and other supported media links.
 
 The portable release keeps its configuration, OAuth token, caches, logs, sync baselines, and M3U backups beside `SpotySync.exe`. The app login uses Spotify Authorization Code with PKCE. The same compact setup screen also accepts the Spotify app secret needed only by the bundled custom downloader and stores it in that tool's private local configuration.
 
@@ -107,11 +107,11 @@ The marker advances only after every requested track is confidently found in the
 
 The Activity log prints the exact local folder being scanned. If MusicBee has files but the configured folder is empty, SpotySync detects their common library root, saves that corrected folder, and uses it for duplicate checks and download verification. It also recognizes the `Output folder:` reported by the custom downloader as a final safeguard.
 
-The supplied custom `spot2yt.exe` is the default Spotify downloader. SpotySync checks the bundled `yt-dlp.exe` for updates before a download at most once every seven days; this is enabled by default and configurable in Settings. An update failure is logged but does not block the download.
+The bundled `spotdl.exe` (spotDL) is the default Spotify downloader. SpotySync checks the bundled `yt-dlp.exe` for updates before a download at most once every seven days; this is enabled by default and configurable in Settings. An update failure is logged but does not block the download.
 
-Enter the Spotify app's Client ID and Client secret in the normal Settings card. SpotySync uses PKCE for its own login and automatically writes the private configuration expected by spot2yt; the internal file never needs to be opened manually and must not be shared. The public official `spotdl.exe` remains packaged as an optional alternative, but SpotySync does not select it by default.
+SpotySync also supports `spot2yt.exe`, a private custom downloader that is not distributed. If you have it, put it in `Tools` and select it in Settings › Downloader. It needs the Spotify app's Client secret, which SpotySync stores in a private file for it. Settings that point at a missing spot2yt.exe switch to spotDL automatically.
 
-**Download Spotify / YouTube links...** accepts one or more pasted links. Spotify URLs and URIs are sent to the configured downloader—`spot2yt.exe` by default—while YouTube and other media URLs are downloaded directly with the bundled `yt-dlp.exe`. If spot2yt reports a missing YouTube Music source, the enabled-by-default regular-YouTube fallback scores direct candidates and, when needed, exact titled chapters inside a matching artist/album upload. Starting either kind of download switches to Activity immediately.
+**Download Spotify / YouTube links...** accepts one or more pasted links. Spotify URLs and URIs are sent to the configured downloader (`spotdl.exe` by default), while YouTube and other media URLs are downloaded directly with the bundled `yt-dlp.exe`. If spot2yt reports a missing YouTube Music source, the enabled-by-default regular-YouTube fallback scores direct candidates and, when needed, exact titled chapters inside a matching artist/album upload. Starting either kind of download switches to Activity immediately.
 
 SpotySync answers the custom downloader's internal prompts only when they actually occur and exits after the submitted GUI job. Unused link prompts are hidden, and its early `All done` message is labeled as the audio stage rather than the end of MusicBee processing.
 
