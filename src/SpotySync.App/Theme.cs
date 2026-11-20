@@ -2,7 +2,7 @@ using System.Globalization;
 
 namespace SpotySyncApp;
 
-/// <summary>Colour helpers shared by the theme engine and every custom-drawn control.</summary>
+/// <summary>Color helpers shared by the theme engine and every custom-drawn control.</summary>
 internal static class ColorX
 {
     public static Color Hex(string hex)
@@ -37,26 +37,26 @@ internal static class ColorX
     public static Color Alpha(Color c, int alpha) => Color.FromArgb(Math.Clamp(alpha, 0, 255), c.R, c.G, c.B);
 }
 
-/// <summary>A theme as designed: the handful of colours a designer picks. Everything else is derived.</summary>
+/// <summary>A theme as designed: the handful of colors a designer picks. Everything else is derived.</summary>
 internal sealed record ThemeDef(string Id, string Name, string Group,
     string Bg, string Panel, string Panel2, string Raised, string Well, string Line, string Line2,
     string Ink, string Muted, string Dim, string Accent, string Glow, string? Accent2 = null,
     /// <summary>Optional backdrop effect drawn once into the cached page-header backdrop: stars, grid, scan, rays, waves, embers.</summary>
     string? Fx = null);
 
-/// <summary>The resolved colours every control paints with.</summary>
+/// <summary>The resolved colors every control paints with.</summary>
 internal sealed class Palette
 {
     public string Id = "";
     public string Name = "";
     public Color Bg, Glow, Panel, Panel2, Field, Well, Line, Border, Ink, Muted, Dim;
     public Color Accent, AccentHi, AccentLo, AccentInk, Sel, Hover;
-    /// <summary>Second accent: equal to Accent for single-colour themes, a contrasting hue for duotones.</summary>
+    /// <summary>Second accent: equal to Accent for single-color themes, a contrasting hue for duotones.</summary>
     public Color Accent2, Glow2;
     public bool Duotone;
     public string Fx = "";
     public Color Ok, Warn, Err, Busy, Info;
-    // Semantic sync colours (kept recognisable across every theme)
+    // Semantic sync colors (kept recognisable across every theme)
     public Color SpotifyAdd, LocalAdd, Protected, Removal;
 
     public static Palette From(ThemeDef t, Color? accentOverride = null)
@@ -107,7 +107,7 @@ internal static class ThemeCatalog
         ?? RandomPool.FirstOrDefault(x => x.Id.Equals(id ?? "", StringComparison.OrdinalIgnoreCase))
         ?? All[0];
 
-    /// <summary>Builds a whole theme from a background, a surface tint, one accent and the text colour.</summary>
+    /// <summary>Builds a whole theme from a background, a surface tint, one accent and the text color.</summary>
     private static ThemeDef Make(string id, string name, string group, string bg, string tint, string accent, string ink, double strength = 1.0, string? accent2 = null, string? fx = null)
     {
         var b = ColorX.Hex(bg); var tt = ColorX.Hex(tint); var i = ColorX.Hex(ink); var a = ColorX.Hex(accent);
@@ -162,7 +162,7 @@ internal static class ThemeCatalog
             Make("game_glade", "Meadow Glade", G, "#080b0a", "#23402f", "#8fd6a0", "#eefaf2", 1.5, "#ffb48a"),
             Make("game_astro", "Astro Orange", G, "#050812", "#1a2a50", "#ff8a3d", "#eef3ff", 1.5, "#3ed8c3"),
             Make("game_element115", "Element 115", G, "#03050a", "#122a3a", "#46f0ff", "#e8fdff", 1.5, "#b45cff", "stars"), // glowing 115 cyan + Pack-a-Punch violet
-            // The colour schemes from the T320 Pool Planner
+            // The color schemes from the T320 Pool Planner
             new("graphite", "Rack Graphite", C, "#0a0e13", "#10161d", "#141b24", "#19212d", "#0b1016", "#202a37", "#2c394a", "#e8eef5", "#95a3b5", "#66758b", "#f4ab3e", "#132339"),
             new("midnight", "Midnight Blue", C, "#070b16", "#0b1222", "#0f172b", "#152038", "#070c18", "#1a2642", "#263559", "#e6edff", "#9aa9cc", "#62719a", "#5ea2ff", "#10224a"),
             new("tokyo", "Tokyo Night", C, "#16161e", "#1a1b26", "#1f2030", "#24283b", "#13131a", "#292e42", "#3b4261", "#c0caf5", "#a9b1d6", "#565f89", "#7aa2f7", "#24283b"),

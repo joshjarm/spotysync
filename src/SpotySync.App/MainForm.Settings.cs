@@ -21,6 +21,8 @@ public sealed partial class MainForm
     private readonly FieldBox soundtrackRoot = Field();
     private readonly DarkComboBox backend = new() { Width = 220 };
     private readonly DarkComboBox direction = new() { Width = 220 };
+    private readonly DarkComboBox downloadSpeed = new() { Width = 330 };
+    private readonly DarkComboBox downloadFormat = new() { Width = 330 };
     private readonly ToggleSwitch enableRemovals = new() { Danger = true };
     private readonly ToggleSwitch likedOnly = new();
     private readonly ToggleSwitch ownedOnly = new();
@@ -146,21 +148,27 @@ public sealed partial class MainForm
         g.Add(new SettingRow("Auto-update yt-dlp", "Keep the bundled yt-dlp current before downloads.", autoUpdateYtDlp, EditorWidth.Narrow, "youtube update ytdlp"));
         g.Add(new SettingRow("yt-dlp update interval (days)", "How often the yt-dlp update check runs.", ytDlpUpdateDays, EditorWidth.Narrow, "youtube update interval"));
         g.Add(new SettingRow("Automatic public-source fallback", "When a track has no YouTube Music source, try YouTube, album chapters and SoundCloud.", autoYouTubeFallback, EditorWidth.Narrow, "youtube soundcloud fallback recovery"));
+        downloadSpeed.Items.AddRange(new object[] { "Safe", "Balanced", "Fast", "Max" });
+        downloadSpeed.Format += (_, e) => e.Value = e.ListItem?.ToString() switch { "Safe" => "Safe - 1 song at a time, 4-10 s pauses", "Balanced" => "Balanced - 2 at a time, short pauses", "Fast" => "Fast - 4 at a time, almost no pauses", "Max" => "Max - 6 at a time, no pauses", var s => s };
+        g.Add(new SettingRow("Download speed", "How hard SpotySync pushes YouTube. If it starts limiting you, the download slows down by itself and the Console says which speed was too fast.", downloadSpeed, EditorWidth.Wide, "speed fast slow threads pause sleep rate limit"));
+        downloadFormat.Items.AddRange(Downloader.FormatNames);
+        downloadFormat.Format += (_, e) => e.Value = e.ListItem?.ToString() switch { "Opus" => "Opus - original YouTube audio, best quality", "MP3" => "MP3 - 320 kbps, plays on anything", "M4A" => "M4A - AAC audio, good for Apple devices", var s => s };
+        g.Add(new SettingRow("Download format", "File type for new downloads. Opus keeps YouTube's audio exactly as it is (best quality, smallest files). MP3 plays on every device but is re-encoded, so it loses a little quality. Songs you already have are not converted.", downloadFormat, EditorWidth.Wide, "format file type opus mp3 m4a aac quality bitrate codec"));
 
         // ---- Appearance
-        g = v.AddGroup("appearance", "Appearance", "Look & feel", Glyph.Palette, "theme colour color look");
+        g = v.AddGroup("appearance", "Appearance", "Look & feel", Glyph.Palette, "theme color look");
         swatches.Picked += def => { settings.UiTheme = def.Id; settings.UiAccent = ""; ReapplyTheme(); };
-        g.Add(new SettingRow("Theme", "Pick a colour scheme. It applies instantly and is saved automatically.", swatches, EditorWidth.Full,
-            "theme gallery dark oled qd colours colors palette " + string.Join(' ', ThemeCatalog.All.Select(t => t.Name.ToLowerInvariant()))));
+        g.Add(new SettingRow("Theme", "Pick a color scheme. It applies instantly and is saved automatically.", swatches, EditorWidth.Full,
+            "theme gallery dark oled qd colors palette " + string.Join(' ', ThemeCatalog.All.Select(t => t.Name.ToLowerInvariant()))));
         var pickAccent = RoundedButton.Make("Pick…", ButtonKind.Secondary, Glyph.Palette, (_, _) => PickAccent());
         var resetAccent = RoundedButton.Make("Theme default", ButtonKind.Ghost, Glyph.Undo, (_, _) => { settings.UiAccent = ""; ReapplyTheme(); });
-        g.Add(new SettingRow("Accent colour", "Override the theme's accent with any colour you like.", ButtonRow(accentSwatch, pickAccent, resetAccent), EditorWidth.Narrow, "accent highlight custom colour color"));
+        g.Add(new SettingRow("Accent color", "Override the theme's accent with any color you like.", ButtonRow(accentSwatch, pickAccent, resetAccent), EditorWidth.Narrow, "accent highlight custom color"));
         var surprise = RoundedButton.Make("Surprise me", ButtonKind.Secondary, Glyph.Shuffle, (_, _) => ApplyRandomTheme());
         g.Add(new SettingRow("Random theme", "Try a random theme, including extra two-tone schemes that are not in the gallery.", surprise, EditorWidth.Narrow, "random shuffle surprise"));
         fontChoice.Items.AddRange(["Modern", "Condensed", "Terminal"]);
         g.Add(new SettingRow("Font style", "Modern (Segoe UI with condensed headings), Condensed (Bahnschrift) or Terminal (Cascadia Mono).", fontChoice, EditorWidth.Narrow, "font typeface text mono condensed bahnschrift segoe cascadia"));
         g.Add(new SettingRow("Rounded corners", "Soft rounded cards and buttons, or sharp rack-style edges.", roundedCorners, EditorWidth.Narrow, "corners radius sharp round"));
-        g.Add(new SettingRow("Background glow", "A soft accent-coloured glow at the top of the window.", backgroundGlow, EditorWidth.Narrow, "glow gradient background"));
+        g.Add(new SettingRow("Background glow", "A soft accent-colored glow at the top of the window.", backgroundGlow, EditorWidth.Narrow, "glow gradient background"));
         g.Add(new SettingRow("Animations", "Animated switches and progress bar.", animations, EditorWidth.Narrow, "motion animation reduce"));
 
         // ---- Layout
@@ -170,7 +178,6 @@ public sealed partial class MainForm
             cardEditor, EditorWidth.Full, "dashboard cards modules widgets order hide show customize"));
         g.Add(new SettingRow("Console: simple view", "Show only what matters: what is downloading (with progress), what finished, and any problems. Turn off for the full technical log.",
             consoleSimpleDefault, EditorWidth.Narrow, "console simple clean progress verbose log"));
-        g.Add(new SettingRow("Console: downloader detail", "Show every line from the downloader in the Console by default (they are always in the log file).", consoleDetailDefault, EditorWidth.Narrow, "console verbose detail downloader log"));
         g.Add(new SettingRow("Console: timestamps", "Show the time next to every Console line.", consoleTimesDefault, EditorWidth.Narrow, "console time timestamps"));
 
         // ---- Data
@@ -250,6 +257,8 @@ public sealed partial class MainForm
             t.CheckedChanged += Dirty;
         backend.SelectedIndexChanged += Dirty;
         direction.SelectedIndexChanged += Dirty;
+        downloadSpeed.SelectedIndexChanged += Dirty;
+        downloadFormat.SelectedIndexChanged += Dirty;
     }
 
     private void MarkDirty()
@@ -365,6 +374,8 @@ public sealed partial class MainForm
             autoStartMusicBee.Checked = settings.AutoStartMusicBee; importDownloads.Checked = settings.ImportDownloadsIntoMusicBee; primeDownloads.Checked = settings.PrimeDownloadsInMusicBee;
             removalCap.Value = settings.MaxRemovalsPerPlaylist; cacheDays.Value = settings.LikedCacheFullRefreshDays; lookbackDays.Value = settings.FirstRunLikedLookbackDays;
             downloadAnchorCount.Value = settings.DownloadAnchorFileCount; autoUpdateYtDlp.Checked = settings.AutoUpdateYtDlp; autoYouTubeFallback.Checked = settings.AutoYouTubeFallback; ytDlpUpdateDays.Value = settings.YtDlpUpdateDays;
+            downloadSpeed.SelectedItem = new[] { "Safe", "Balanced", "Fast", "Max" }.FirstOrDefault(s => s.Equals(settings.DownloadSpeed, StringComparison.OrdinalIgnoreCase)) ?? "Fast";
+            downloadFormat.SelectedItem = Downloader.NormalizeFormat(settings.DownloadFormat);
             apiRetry.Value = settings.ApiRetryCount; bridgePort.Value = settings.MusicBeeBridgePort; markerOverlap.Value = settings.BackupMarkerOverlapMinutes; createTempPlaylist.Checked = settings.CreateTemporaryDownloadPlaylist;
             includePatterns.Text = settings.PlaylistInclude; excludePatterns.Text = settings.PlaylistExclude;
             LoadAppearanceFields();
@@ -403,6 +414,8 @@ public sealed partial class MainForm
             settings.AutoStartMusicBee = autoStartMusicBee.Checked; settings.ImportDownloadsIntoMusicBee = importDownloads.Checked; settings.PrimeDownloadsInMusicBee = primeDownloads.Checked;
             settings.MaxRemovalsPerPlaylist = (int)removalCap.Value; settings.LikedCacheFullRefreshDays = (int)cacheDays.Value; settings.FirstRunLikedLookbackDays = (int)lookbackDays.Value;
             settings.DownloadAnchorFileCount = (int)downloadAnchorCount.Value; settings.AutoUpdateYtDlp = autoUpdateYtDlp.Checked; settings.AutoYouTubeFallback = autoYouTubeFallback.Checked; settings.YtDlpUpdateDays = (int)ytDlpUpdateDays.Value;
+            settings.DownloadSpeed = downloadSpeed.SelectedItem?.ToString() ?? "Fast";
+            settings.DownloadFormat = Downloader.NormalizeFormat(downloadFormat.SelectedItem?.ToString());
             settings.ApiRetryCount = (int)apiRetry.Value; settings.MusicBeeBridgePort = (int)bridgePort.Value; settings.BackupMarkerOverlapMinutes = (int)markerOverlap.Value; settings.CreateTemporaryDownloadPlaylist = createTempPlaylist.Checked;
             settings.PlaylistInclude = includePatterns.Text.Trim(); settings.PlaylistExclude = excludePatterns.Text.Trim();
             if (Path.GetFileName(settings.DownloaderPath).StartsWith("spot2yt", StringComparison.OrdinalIgnoreCase) && clientSecret.Text.Trim().Length == 0)
@@ -534,7 +547,7 @@ public sealed partial class MainForm
     }
 }
 
-/// <summary>Round swatch showing the current accent colour (click to pick).</summary>
+/// <summary>Round swatch showing the current accent color (click to pick).</summary>
 internal sealed class AccentSwatch : ThemedControl
 {
     public AccentSwatch() { Size = new Size(34, 34); Cursor = Cursors.Hand; }

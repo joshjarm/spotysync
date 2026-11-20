@@ -135,7 +135,7 @@ internal static class LogClassifier
     }
 }
 
-/// <summary>Builds coloured RTF for a set of entries (fast enough for thousands of lines).</summary>
+/// <summary>Builds colored RTF for a set of entries (fast enough for thousands of lines).</summary>
 internal static class LogRtf
 {
     public static string Build(IEnumerable<LogEntry> entries, bool timestamps, float fontSize, bool simple = false)
@@ -168,7 +168,7 @@ internal static class LogRtf
         sb.Append($"\\cf{color} ").Append(Escape(marker + text));
     }
 
-    // colour indices: 1 ink, 2 muted, 3 dim, 4 accent, 5 ok, 6 warn, 7 err, 8 blue, 9 purple, 10 green, 11 soft-ok
+    // color indices: 1 ink, 2 muted, 3 dim, 4 accent, 5 ok, 6 warn, 7 err, 8 blue, 9 purple, 10 green, 11 soft-ok
     private static void Line(StringBuilder sb, LogEntry e, bool timestamps)
     {
         if (e.Level == LogLevel.Header)
@@ -260,12 +260,12 @@ internal sealed class ConsoleView : Panel
         public readonly List<string> Issues = new();
     }
 
-    public ConsoleView(bool showDetail, bool timestamps, bool simple = true)
+    public ConsoleView(bool showDetail, bool timestamps, bool simple = false)
     {
         simpleSwitch.Checked = simple;
         SetStyle(ControlStyles.SupportsTransparentBackColor, true);
         BackColor = Color.Transparent;
-        detailSwitch.Checked = showDetail;
+        detailSwitch.Checked = true; // downloader lines are always shown (the switch is gone)
         timeSwitch.Checked = timestamps;
 
         var toolbar = new WrapRow();
@@ -276,7 +276,7 @@ internal sealed class ConsoleView : Panel
         search.Margin = new Padding(8, 0, 12, 0);
         search.Height = 32;
         foreach (var c in new Control[] { allChip, warnChip, errorChip, search }) left.Controls.Add(c);
-        foreach (var s in new[] { simpleSwitch, detailSwitch })
+        foreach (var s in new[] { simpleSwitch })
         {
             s.Width = s.GetPreferredSize(Size.Empty).Width; s.Margin = new Padding(6, 3, 6, 0);
             left.Controls.Add(s);

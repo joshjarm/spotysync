@@ -30,7 +30,7 @@ public sealed partial class MainForm
     private readonly Panel dashPlanDetailView = new();
     private readonly SmoothRichText dashPlanDetail = new();
     private PlaylistPlan? dashPlanShown;
-    private bool dashPlanStale; // colours or applied state changed: rewrite the open overview
+    private bool dashPlanStale; // colors or applied state changed: rewrite the open overview
     private readonly LibraryStats libraryStats = new() { Dock = DockStyle.Fill };
     private LogFeed? dashFeed;
     private ActivityWindow? activityWindow;
@@ -123,10 +123,10 @@ public sealed partial class MainForm
         // Library tools
         var libraryBody = new Panel();
         var libraryFooter = new Row { Dock = DockStyle.Bottom, Height = 44, Padding = new Padding(0, 8, 0, 0) };
-        var analyse = RoundedButton.Make("Analyse", ButtonKind.Primary, Glyph.Library, async (_, _) => await AnalyseLibraryAsync(false));
-        busyButtons.Add(analyse);
-        analyse.Margin = new Padding(0, 0, 8, 0);
-        libraryFooter.Controls.Add(analyse);
+        var analyze = RoundedButton.Make("Analyze", ButtonKind.Primary, Glyph.Library, async (_, _) => await AnalyseLibraryAsync(false));
+        busyButtons.Add(analyze);
+        analyze.Margin = new Padding(0, 0, 8, 0);
+        libraryFooter.Controls.Add(analyze);
         libraryStats.Open += index => { ShowInsight(InsightTabs[index].Kind); SelectPage(PageLibrary); };
         libraryBody.Controls.Add(libraryStats); libraryBody.Controls.Add(libraryFooter);
         AddDashCard("library", "Library tools", "Find gaps", Glyph.Library, libraryBody, 1, 300);

@@ -637,6 +637,9 @@ static void ValidateLiveFeatures(MainForm form, string output)
     if (Prop<long>("Downloaded") < 1024 * 1024) throw new InvalidOperationException($"The graph did not measure the growing download ({Prop<long>("Downloaded")} bytes).");
     if (Prop<int>("Done") != 1 || Prop<int?>("Target") != 3) throw new InvalidOperationException($"Song counts are wrong (done {Prop<int>("Done")}, queue {Prop<int?>("Target")}).");
     if (!Prop<string>("CurrentName").Contains("Track 2")) throw new InvalidOperationException("The current song is wrong: " + Prop<string>("CurrentName"));
+    if (Prop<double>("Speed") <= 0) throw new InvalidOperationException("The speed dropped to 0 during a short pause between songs.");
+    note.Invoke(monitor, ["Found 19 songs in S TIER NO DOUBT (Playlist)"]);
+    if (Prop<int?>("Target") != 21) throw new InvalidOperationException($"Songs inside a playlist were not counted (queue {Prop<int?>("Target")}, expected 21).");
     using (var shot = new Bitmap(form.ClientSize.Width, form.ClientSize.Height)) { form.DrawToBitmap(shot, form.ClientRectangle); shot.Save(Path.Combine(output, "console-split-live.png"), System.Drawing.Imaging.ImageFormat.Png); }
     Invoke(form, "SetConsoleSplit", false);
     Invoke(form, "SelectPage", 0);

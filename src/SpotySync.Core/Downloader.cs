@@ -19,6 +19,69 @@ public sealed class Downloader
 {
     private static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase) { ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".wav", ".wma", ".aac", ".aiff", ".wv" };
     private const string AccountSleepMin = "4", AccountSleepMax = "10";
+
+    // Download pace (settings: Safe, Balanced, Fast, Max). If YouTube or Spotify start limiting, the pace steps down
+    // one level for the rest of the download and the log says so - that is how the real limit shows up.
+    private static readonly string[] PaceNames = ["Safe", "Balanced", "Fast", "Max"];
+    private static readonly (int Threads, int SleepMin, int SleepMax)[] Paces = [(1, 4, 10), (2, 2, 5), (4, 0, 2), (6, 0, 0)];
+    private int speedLevel = -1;
+    private (int Threads, int SleepMin, int SleepMax) Pace
+    {
+        get
+        {
+            if (speedLevel < 0) speedLevel = Math.Max(0, Array.FindIndex(PaceNames, n => n.Equals(settings.DownloadSpeed?.Trim(), StringComparison.OrdinalIgnoreCase)));
+            if (speedLevel == 0 && !PaceNames[0].Equals(settings.DownloadSpeed?.Trim(), StringComparison.OrdinalIgnoreCase)) speedLevel = 2; // unknown value: Fast
+            return Paces[speedLevel];
+        }
+    }
+
+    /// <summary>Download file types (setting DownloadFormat). Opus is the default.</summary>
+    public static readonly string[] FormatNames = ["Opus", "MP3", "M4A"];
+
+    /// <summary>The setting value cleaned up: Opus, MP3 or M4A. Anything unknown means Opus.</summary>
+    public static string NormalizeFormat(string? format) =>
+        FormatNames.FirstOrDefault(n => n.Equals(format?.Trim(), StringComparison.OrdinalIgnoreCase)) ?? "Opus";
+
+    /// <summary>spotDL arguments for the chosen file type.</summary>
+    public static string[] SpotDlFormatArguments(string? format) => NormalizeFormat(format) switch
+    {
+        // spotDL's own default re-encodes to 128 kbps MP3, so MP3 asks for 320 kbps.
+        "MP3" => ["--format", "mp3", "--bitrate", "320k"],
+        // spotDL picks YouTube's AAC stream for M4A; with the bitrate option off it is copied unchanged.
+        "M4A" => ["--format", "m4a", "--bitrate", "disable"],
+        // Opus with the bitrate option off copies YouTube Music's best stream unchanged.
+        _ => ["--format", "opus", "--bitrate", "disable"]
+    };
+
+    /// <summary>yt-dlp arguments (stream choice + audio extraction) for the chosen file type.</summary>
+    public static string[] YtDlpFormatArguments(string? format) => NormalizeFormat(format) switch
+    {
+        "MP3" => ["--format", "bestaudio/best", "--extract-audio", "--audio-format", "mp3", "--audio-quality", "320K"],
+        // Prefer the AAC (m4a) stream so it is copied instead of converted.
+        "M4A" => ["--format", "bestaudio[ext=m4a]/bestaudio/best", "--extract-audio", "--audio-format", "m4a"],
+        // Keep the source's best audio stream bit-for-bit (normally YouTube's Opus format 251).
+        _ => ["--format", "bestaudio/best", "--extract-audio", "--audio-format", "best"]
+    };
+
+    private static readonly System.Text.RegularExpressions.Regex RateLimited = new(
+        @"HTTP Error 429|429 Client Error|Too Many Requests|rate.?limit|Sign in to confirm you.re not a bot|confirm you.re not a bot",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>Steps the pace down after a run whose output shows rate limiting.</summary>
+    private void BackOffIfLimited(IEnumerable<string> output)
+    {
+        var hit = output.FirstOrDefault(line => RateLimited.IsMatch(line));
+        if (hit is null) return;
+        _ = Pace;
+        if (speedLevel == 0)
+        {
+            log("WARNING: YouTube/Spotify is limiting downloads even at Safe speed. Take a break (an hour or more) before downloading again.");
+            return;
+        }
+        speedLevel--;
+        log($"WARNING: hit a rate limit ({hit.Trim()}). Slowing down to {PaceNames[speedLevel]} speed for the rest of this download. " +
+            $"If this keeps happening, set Download speed to {PaceNames[speedLevel]} in Settings.");
+    }
     private readonly PortableSettings settings;
     private readonly Action<string> log;
 
@@ -99,6 +162,22 @@ public sealed class Downloader
                     log($"Link {i + 1} of {spotifyUrls.Count}: {url}");
                     var one = await RunAsync(new[] { url }, expectedTracks, cancellationToken);
                     singles.Add(one);
+                    if (one.ExitCode != 0 && one.ChangedAudio.Count == 0 && CachedPlaylistTrackUrls(url) is { Count: > 0 } tracks)
+                    {
+                        // spotDL can't read some playlists (KeyError: 'ownerV2' in its playlist parser). SpotySync
+                        // already knows the playlist's songs from its Spotify cache, so download those directly.
+                        log($"spotDL couldn't read this playlist (a known spotDL bug); downloading its {tracks.Count} song(s) from SpotySync's copy of the playlist instead.");
+                        log($"Found {tracks.Count} songs in playlist {url}");
+                        var parts = new List<DownloadRunResult> { one };
+                        foreach (var chunk in tracks.Chunk(50))
+                        {
+                            await DownloadProcesses.WaitIfPausedAsync(cancellationToken);
+                            parts.Add(await RunAsync(chunk, expectedTracks, cancellationToken));
+                        }
+                        one = Merge(parts);
+                        one.ExitCode = parts.Skip(1).All(p => p.ExitCode == 0) ? 0 : 1;
+                        singles[^1] = one;
+                    }
                     if (one.ExitCode != 0 && one.ChangedAudio.Count == 0) failed.Add(url);
                 }
                 foreach (var url in failed)
@@ -110,6 +189,21 @@ public sealed class Downloader
         }
         if (mediaUrls.Count > 0) results.Add(await RunYtDlpAsync(mediaUrls, cancellationToken));
         return Merge(results);
+    }
+
+    /// <summary>Track links of a Spotify playlist from SpotySync's own playlist cache (empty when it isn't cached).</summary>
+    internal List<string> CachedPlaylistTrackUrls(string url)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(url, @"playlist[/:]([A-Za-z0-9]{22})");
+        if (!match.Success) return new List<string>();
+        try
+        {
+            var cache = JsonStore.Load(settings.PlaylistCachePath, () => new PlaylistTrackCache());
+            return cache.Playlists.TryGetValue(match.Groups[1].Value, out var entry)
+                ? entry.Tracks.Where(t => !t.IsLocal && t.SpotifyId.Length > 0).Select(t => "https://open.spotify.com/track/" + t.SpotifyId).Distinct().ToList()
+                : new List<string>();
+        }
+        catch { return new List<string>(); }
     }
 
     private async Task<DownloadRunResult> RunYtDlpAsync(IReadOnlyList<string> urls, CancellationToken cancellationToken)
@@ -151,11 +245,7 @@ public sealed class Downloader
         };
         start.Environment["PATH"] = Path.GetDirectoryName(executable)! + Path.PathSeparator +
             (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
-        // Keep the source's best audio stream bit-for-bit (normally YouTube's Opus
-        // format 251). Converting to MP3 would re-encode already lossy audio.
-        start.ArgumentList.Add("--format"); start.ArgumentList.Add("bestaudio/best");
-        start.ArgumentList.Add("--extract-audio");
-        start.ArgumentList.Add("--audio-format"); start.ArgumentList.Add("best");
+        foreach (var argument in YtDlpFormatArguments(settings.DownloadFormat)) start.ArgumentList.Add(argument);
         start.ArgumentList.Add("--embed-metadata");
         start.ArgumentList.Add("--embed-thumbnail");
         start.ArgumentList.Add("--windows-filenames");
@@ -172,9 +262,12 @@ public sealed class Downloader
         {
             start.ArgumentList.Add("--cookies-from-browser");
             start.ArgumentList.Add(cookieBrowser);
-            // Pace signed-in downloads like a listener, not a bot, to protect the account.
-            start.ArgumentList.Add("--sleep-interval"); start.ArgumentList.Add(AccountSleepMin);
-            start.ArgumentList.Add("--max-sleep-interval"); start.ArgumentList.Add(AccountSleepMax);
+            // pauses between signed-in downloads follow the Download speed setting
+            if (Pace.SleepMax > 0)
+            {
+                start.ArgumentList.Add("--sleep-interval"); start.ArgumentList.Add(Pace.SleepMin.ToString());
+                start.ArgumentList.Add("--max-sleep-interval"); start.ArgumentList.Add(Pace.SleepMax.ToString());
+            }
         }
         start.ArgumentList.Add("--output");
         start.ArgumentList.Add(outputTemplate ?? Path.Combine(musicFolder, "%(title)s - %(uploader)s.%(ext)s"));
@@ -273,24 +366,26 @@ public sealed class Downloader
             start.ArgumentList.Add(Path.Combine(musicFolder, "{artists} - {title}.{output-ext}"));
             start.ArgumentList.Add("--overwrite");
             start.ArgumentList.Add(overwriteMode);
-            // spotDL's default re-encodes everything to 128 kbps MP3. Opus with the
-            // bitrate option disabled copies YouTube Music's best stream unchanged.
-            start.ArgumentList.Add("--format");
-            start.ArgumentList.Add("opus");
-            start.ArgumentList.Add("--bitrate");
-            start.ArgumentList.Add("disable");
+            foreach (var argument in SpotDlFormatArguments(settings.DownloadFormat)) start.ArgumentList.Add(argument);
             var browser = ConfiguredCookieBrowser(toolDirectory);
             if (browser is not null)
             {
                 // Signed in (YouTube Premium): spotDL's built-in yt-dlp then sees the ~256 kbps
                 // streams (needs the bgutil PO-token plugin). One song at a time, with pauses.
-                log($"Using the signed-in {browser} YouTube session for higher-quality audio.");
+                var pace = Pace;
+                log($"Using the signed-in {browser} YouTube session for higher-quality audio ({PaceNames[speedLevel]} speed: {pace.Threads} song(s) at a time" +
+                    (pace.SleepMax > 0 ? $", {pace.SleepMin}-{pace.SleepMax} s pauses)." : ", no pauses)."));
                 premiumBrowser = browser;
                 start.ArgumentList.Add("--threads");
-                start.ArgumentList.Add("1");
+                start.ArgumentList.Add(pace.Threads.ToString());
                 start.ArgumentList.Add("--yt-dlp-args");
-                start.ArgumentList.Add($"--cookies-from-browser {browser} --sleep-interval {AccountSleepMin} --max-sleep-interval {AccountSleepMax}" +
+                start.ArgumentList.Add($"--cookies-from-browser {browser}" + (pace.SleepMax > 0 ? $" --sleep-interval {pace.SleepMin} --max-sleep-interval {pace.SleepMax}" : "") +
                     string.Concat(PoTokenHelperArgs(toolDirectory).Select(argument => " " + (argument.StartsWith("--") ? argument : "\"" + argument + "\""))));
+            }
+            else
+            {
+                start.ArgumentList.Add("--threads");
+                start.ArgumentList.Add(Math.Max(2, Pace.Threads).ToString());
             }
             start.ArgumentList.Add("--print-errors");
         }
@@ -338,13 +433,16 @@ public sealed class Downloader
             changed = changed.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
         if (premiumBrowser is not null) await ReportAudioQualityAsync(toolDirectory, premiumBrowser, changed, cancellationToken);
+        BackOffIfLimited(output);
         var reportedErrors = output.Count(IsDownloaderError);
+        // spotDL exits 1 when only its closing progress display crashed on a song name: that is not a failed run
+        var exitCode = process.ExitCode != 0 && reportedErrors == 0 && output.Contains(CosmeticExitMarker) ? 0 : process.ExitCode;
         var skippedTracks = ExtractSkippedTrackNames(output);
         if (process.ExitCode == 0 && reportedErrors > 0)
             log($"WARNING: {Path.GetFileName(executable)} returned exit code 0 but reported {reportedErrors} download error line(s).");
         return new DownloadRunResult
         {
-            ExitCode = process.ExitCode, ReportedErrors = reportedErrors,
+            ExitCode = exitCode, ReportedErrors = reportedErrors,
             DownloaderName = Path.GetFileName(executable),
             OutputFolder = reportedOutputFolder ?? musicFolder,
             ChangedAudio = changed,
@@ -690,10 +788,42 @@ public sealed class Downloader
     {
         var lines = new List<string>();
         var current = ""; var lastStep = -1;
+        // spotDL's console library sometimes can't print song names with non-Latin letters (Windows code page) and
+        // dumps a Python "Logging error" block per song, then a final traceback when it closes its progress display.
+        // Nothing actually fails, so those blocks are reduced to the one useful fact (which song was skipped).
+        var inLoggingError = false; var pendingSkip = false; var afterExcepthook = false;
         while (await reader.ReadLineAsync(cancellationToken) is { } line)
             if (!string.IsNullOrWhiteSpace(line))
             {
                 line = line.TrimEnd();
+                var bare = line.Trim();
+                if (afterExcepthook) continue;
+                if (bare == "--- Logging error ---") { inLoggingError = true; pendingSkip = false; continue; }
+                if (inLoggingError)
+                {
+                    if (bare.StartsWith("Message: 'Skipping %s", StringComparison.Ordinal)) pendingSkip = true;
+                    if (bare.StartsWith("Arguments:", StringComparison.Ordinal))
+                    {
+                        inLoggingError = false;
+                        var name = System.Text.RegularExpressions.Regex.Match(bare, @"^Arguments: \('(.*?)', ");
+                        if (pendingSkip && name.Success)
+                        {
+                            string song;
+                            try { song = System.Text.RegularExpressions.Regex.Unescape(name.Groups[1].Value); } catch { song = name.Groups[1].Value; }
+                            var skip = $"Skipping {song} (file already exists)";
+                            lines.Add(skip);
+                            log(prefix + " | " + skip);
+                        }
+                    }
+                    continue;
+                }
+                if (bare == "Error in sys.excepthook:")
+                {
+                    afterExcepthook = true;
+                    lines.Add(CosmeticExitMarker);
+                    log(prefix + " | spotDL finished; its progress display couldn't show a song name with special characters when closing (harmless).");
+                    continue;
+                }
                 var progress = ProgressLine.Match(line.TrimStart());
                 if (progress.Success)
                 {
@@ -1349,6 +1479,8 @@ public sealed class Downloader
         return values.GetValueOrDefault("SPOTIFY_CLIENT_ID")?.Length > 0 &&
                values.GetValueOrDefault("SPOTIFY_CLIENT_SECRET")?.Length > 0;
     }
+
+    private const string CosmeticExitMarker = "SPOTYSYNC: cosmetic downloader exit";
 
     private static bool IsDownloaderError(string line) =>
         line.Contains("AudioProviderError", StringComparison.OrdinalIgnoreCase) ||

@@ -320,6 +320,12 @@ public sealed class SpotySyncService : IDisposable
             !value.StartsWith("spotify:", StringComparison.OrdinalIgnoreCase) &&
             (!Uri.TryCreate(value, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")));
         if (invalid is not null) return new ManualDownloadResult { Error = "This is not a supported link: " + invalid };
+        urls = await ExpandAndSkipOwnedAsync(urls, cancellationToken);
+        if (urls.Count == 0)
+        {
+            log("Everything in these links is already in your library - nothing to download.");
+            return new ManualDownloadResult { Success = true, ResolvedMusicFolder = settings.ResolvePath(settings.MusicFolder) };
+        }
         log($"Download queue: {urls.Count} song(s).");
         if (urls.Count <= DownloadBatchSize) return await DownloadLinkBatchAsync(urls, cancellationToken);
 
@@ -364,6 +370,60 @@ public sealed class SpotySyncService : IDisposable
             (uri.Query.Length > 0 || uri.Fragment.Length > 0))
             return uri.GetLeftPart(UriPartial.Path);
         return value;
+    }
+
+    /// <summary>
+    /// Makes the queue as short as possible before spotDL sees it: playlists SpotySync already knows are replaced by
+    /// their songs (spotDL's playlist reader is slow and sometimes crashes with KeyError 'ownerV2'), and songs that
+    /// are already in the library are dropped (spotDL otherwise spends ~15 s on each one just to say "Skipping").
+    /// </summary>
+    internal async Task<List<string>> ExpandAndSkipOwnedAsync(List<string> urls, CancellationToken cancellationToken)
+    {
+        var known = new Dictionary<string, TrackInfo>(StringComparer.OrdinalIgnoreCase);
+        PlaylistTrackCache playlists;
+        try
+        {
+            playlists = JsonStore.Load(settings.PlaylistCachePath, () => new PlaylistTrackCache());
+            foreach (var track in JsonStore.Load(settings.LikedCachePath, () => new LikedTrackCache()).Tracks.Concat(playlists.Playlists.Values.SelectMany(p => p.Tracks)))
+                if (track.SpotifyId.Length > 0 && !track.IsLocal) known.TryAdd(track.SpotifyId, track);
+        }
+        catch { return urls; }
+
+        var expanded = new List<string>();
+        var playlistsExpanded = 0;
+        foreach (var url in urls)
+        {
+            var playlist = System.Text.RegularExpressions.Regex.Match(url, @"open\.spotify\.com/playlist/([A-Za-z0-9]{22})");
+            if (playlist.Success && playlists.Playlists.TryGetValue(playlist.Groups[1].Value, out var entry) && entry.Tracks.Count > 0)
+            {
+                playlistsExpanded++;
+                expanded.AddRange(entry.Tracks.Where(t => !t.IsLocal && t.SpotifyId.Length > 0).Select(t => "https://open.spotify.com/track/" + t.SpotifyId));
+            }
+            else expanded.Add(url);
+        }
+        expanded = expanded.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (playlistsExpanded > 0)
+            log($"Read {playlistsExpanded} playlist(s) from SpotySync's own copy instead of asking spotDL: {expanded.Count} link(s) in total.");
+
+        var trackIds = expanded.Select(u => System.Text.RegularExpressions.Regex.Match(u, @"open\.spotify\.com/track/([A-Za-z0-9]{22})"))
+            .Where(m => m.Success).Select(m => m.Groups[1].Value).ToList();
+        if (trackIds.Count == 0) return expanded;
+        List<LocalTrack> library;
+        try { library = await scanner.ScanAsync(false, cancellationToken); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return expanded; }
+        var owned = new HashSet<string>(library.Where(t => t.SpotifyId.Length > 0).Select(t => t.SpotifyId), StringComparer.OrdinalIgnoreCase);
+        var candidates = trackIds.Where(id => !owned.Contains(id) && known.ContainsKey(id)).Select(id => known[id]).ToList();
+        if (candidates.Count > 0)
+            foreach (var match in new TrackMatcher(candidates).MatchLibrary(library))
+                if (match.IsConfident && match.Spotify is not null) owned.Add(match.Spotify.SpotifyId);
+        var kept = expanded.Where(u =>
+        {
+            var id = System.Text.RegularExpressions.Regex.Match(u, @"open\.spotify\.com/track/([A-Za-z0-9]{22})");
+            return !id.Success || !owned.Contains(id.Groups[1].Value);
+        }).ToList();
+        if (kept.Count < expanded.Count)
+            log($"Skipped {expanded.Count - kept.Count} song(s) you already have, so spotDL doesn't spend time re-checking them.");
+        return kept;
     }
 
     private async Task<ManualDownloadResult> DownloadLinkBatchAsync(List<string> urls, CancellationToken cancellationToken)
