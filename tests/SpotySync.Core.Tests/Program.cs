@@ -71,7 +71,8 @@ var tests = new (string Name, Action Run)[]
     ("M3U write, removal, and backup", TestM3uSafety),
     ("downloads pause and resume their whole process tree", TestDownloadPause),
     ("loaded library catches up with new and deleted files", TestLibraryReconcile),
-    ("console split and graph range settings round trip", TestLiveSettings)
+    ("console split and graph range settings round trip", TestLiveSettings),
+    ("download queue skips songs already in the library", TestQueueSkipsOwnedSongs)
 };
 
 var failures = new List<string>();
@@ -934,6 +935,32 @@ static void TestLiveSettings()
         var loaded = PortableSettings.Load(directory);
         Assert(loaded.UiConsoleSplit && loaded.UiActivityRange == 900, "console split / graph range did not round-trip");
         Assert(loaded.UiDashboardCards == "~console:1:300:0:150,actions:2:320:1:160", "dashboard positions did not round-trip");
+    }
+    finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+}
+
+static void TestQueueSkipsOwnedSongs()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "spotysync-queue-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var music = Path.Combine(directory, "Songs");
+        Directory.CreateDirectory(music);
+        File.WriteAllBytes(Path.Combine(music, "Artist A - Song A.mp3"), [1, 2, 3]);
+        var settings = PortableSettings.Load(directory);
+        settings.MusicFolder = music;
+        settings.FfprobePath = Path.Combine(directory, "missing-ffprobe.exe");
+        Directory.CreateDirectory(settings.DataDirectory);
+        var owned = new TrackInfo { SpotifyId = "AAAAAAAAAAAAAAAAAAAAAA", Title = "Song A", Artists = ["Artist A"], DurationMs = 0 };
+        var missing = new TrackInfo { SpotifyId = "BBBBBBBBBBBBBBBBBBBBBB", Title = "Song B", Artists = ["Artist B"] };
+        var cache = new PlaylistTrackCache();
+        cache.Playlists["PPPPPPPPPPPPPPPPPPPPPP"] = new PlaylistTrackCacheEntry { Tracks = [owned, missing] };
+        JsonStore.SaveAtomic(settings.PlaylistCachePath, cache);
+        using var service = new SpotySyncService(settings);
+        var method = typeof(SpotySyncService).GetMethod("ExpandAndSkipOwnedAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var queue = ((Task<List<string>>)method.Invoke(service, [new List<string> { "https://open.spotify.com/playlist/PPPPPPPPPPPPPPPPPPPPPP", "https://www.youtube.com/watch?v=x" }, CancellationToken.None])!).GetAwaiter().GetResult();
+        Assert(queue.Count == 2 && queue[0] == "https://open.spotify.com/track/BBBBBBBBBBBBBBBBBBBBBB" && queue[1].Contains("youtube"),
+            "a known playlist was not expanded to its missing songs only: " + string.Join(", ", queue));
     }
     finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
 }

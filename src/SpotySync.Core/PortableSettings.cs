@@ -34,6 +34,8 @@ public sealed class PortableSettings
     public bool AutoUpdateYtDlp { get; set; } = true;
     public int YtDlpUpdateDays { get; set; } = 7;
     public bool AutoYouTubeFallback { get; set; } = true;
+    /// <summary>Download pace: Safe, Balanced, Fast or Max (threads + pauses between songs).</summary>
+    public string DownloadSpeed { get; set; } = "Fast";
     public bool ImportDownloadsIntoMusicBee { get; set; } = true;
     public bool PrimeDownloadsInMusicBee { get; set; } = true;
     public bool AutoStartMusicBee { get; set; } = true;
@@ -51,7 +53,7 @@ public sealed class PortableSettings
     public string UiDashboardCards { get; set; } = "";
     public bool UiConsoleDownloaderDetail { get; set; }
     public bool UiConsoleTimestamps { get; set; } = true;
-    public bool UiConsoleSimple { get; set; } = true;
+    public bool UiConsoleSimple { get; set; } // off: the console shows everything by default
     /// <summary>Console page shows the download graph beside the log.</summary>
     public bool UiConsoleSplit { get; set; }
     /// <summary>Download graph time range in seconds (0 = whole run).</summary>
@@ -119,6 +121,7 @@ public sealed class PortableSettings
         settings.AutoUpdateYtDlp = GetBool(values, "Backup", "AutoUpdateYtDlp", settings.AutoUpdateYtDlp);
         settings.YtDlpUpdateDays = GetInt(values, "Backup", "YtDlpUpdateDays", settings.YtDlpUpdateDays, 1, 30);
         settings.AutoYouTubeFallback = GetBool(values, "Backup", "AutoYouTubeFallback", settings.AutoYouTubeFallback);
+        settings.DownloadSpeed = Get(values, "Backup", "DownloadSpeed", settings.DownloadSpeed);
 
         settings.UiTheme = Get(values, "Appearance", "Theme", settings.UiTheme);
         settings.UiAccent = Get(values, "Appearance", "Accent", settings.UiAccent);
@@ -185,6 +188,8 @@ CreateTemporaryPlaylist={CreateTemporaryDownloadPlaylist}
 AutoUpdateYtDlp={AutoUpdateYtDlp}
 YtDlpUpdateDays={YtDlpUpdateDays}
 AutoYouTubeFallback={AutoYouTubeFallback}
+# DownloadSpeed: Safe (1 song at a time, 4-10 s pauses), Balanced, Fast or Max. Slows down by itself if YouTube limits you.
+DownloadSpeed={DownloadSpeed}
 
 [Appearance]
 # Desktop look and layout. Change these from Settings > Appearance; they never affect syncing.

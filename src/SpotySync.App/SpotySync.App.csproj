@@ -8,7 +8,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\SpotySync.ico</ApplicationIcon>
     <AssemblyName>SpotySync</AssemblyName>
-    <Version>1.5.2</Version>
+    <Version>1.5.4</Version>
     <Authors>SpotySync contributors</Authors>
     <Description>Portable Spotify, MusicBee and M3U playlist sync with spotDL downloads.</Description>
   </PropertyGroup>

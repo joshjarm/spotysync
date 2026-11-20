@@ -52,7 +52,17 @@ internal sealed class DownloadMonitor : IDisposable
     public bool Running { get; private set; }
     public bool Paused => pausedSince is not null;
     public string Label { get; private set; } = "";
-    public int? Target { get; private set; }
+    // queue size: links queued, with playlists/albums replaced by the songs spotDL found in them
+    private int baseTarget, containersFound, songsFound;
+    private readonly HashSet<string> foundContainers = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Regex FoundSongs = new(@"Found (\d+) songs in (.+)", RegexOptions.Compiled);
+    public int? Target => baseTarget == 0 && songsFound == 0 ? null : Math.Max(Processed, baseTarget - containersFound + songsFound);
+
+    // steady speed: the rate while data flows, held through the normal pauses between songs
+    private const double HoldSeconds = 90;
+    private readonly Queue<double> activeSeconds = new();
+    private double lastActiveSecond = -1;
+    private int activeTotal;
     public int Looked { get; private set; }
     public int Done => finishedNames.Count;
     public int Failed { get; private set; }
@@ -88,7 +98,11 @@ internal sealed class DownloadMonitor : IDisposable
         }
     }
 
-    public double AverageSpeed => Elapsed.TotalSeconds < 1 ? 0 : Downloaded / Elapsed.TotalSeconds;
+    /// <summary>Average transfer speed while actually downloading (gaps between songs left out).</summary>
+    public double AverageSpeed => activeTotal == 0 ? 0 : Downloaded / (double)activeTotal;
+
+    /// <summary>Downloaded bytes over the whole elapsed time, gaps included.</summary>
+    public double OverallSpeed => Elapsed.TotalSeconds < 1 ? 0 : Downloaded / Elapsed.TotalSeconds;
 
     public void SetResult(string text, Led state) { Result = text; ResultState = state; Updated?.Invoke(); }
 
@@ -96,7 +110,8 @@ internal sealed class DownloadMonitor : IDisposable
     {
         StopWatching();
         Samples.Clear(); Events.Clear(); active.Clear(); partials.Clear(); finals.Clear(); finishedNames.Clear(); window.Clear(); queue.Clear(); tempFolders.Clear();
-        Downloaded = 0; Speed = Peak = 0; Target = null; Looked = Failed = Skipped = 0; BatchText = ""; LastFinished = ""; Phase = "Starting…";
+        baseTarget = containersFound = songsFound = 0; foundContainers.Clear(); activeSeconds.Clear(); lastActiveSecond = -1; activeTotal = 0;
+        Downloaded = 0; Speed = Peak = 0; Looked = Failed = Skipped = 0; BatchText = ""; LastFinished = ""; Phase = "Starting…";
         Ended = null; pausedSince = null; pausedTotal = TimeSpan.Zero; secondBytes = 0; nextSampleAt = 1; lastTick = 0; lastGrowing = ""; tempActivity = false;
         Label = label; Started = DateTime.Now; Running = true;
         // spotDL downloads into ~/.spotdl/temp (yt-dlp ".part" files that grow as data arrives), then converts into the music folder
@@ -159,7 +174,13 @@ internal sealed class DownloadMonitor : IDisposable
         foreach (var pattern in TargetPatterns)
         {
             var m = pattern.Match(t);
-            if (m.Success && int.TryParse(m.Groups[1].Value, out var n) && n > 0) { Target = Math.Max(n, Target ?? 0); break; }
+            if (m.Success && int.TryParse(m.Groups[1].Value, out var n) && n > 0) { baseTarget = Math.Max(n, baseTarget); break; }
+        }
+        var found = FoundSongs.Match(t);
+        if (found.Success && int.TryParse(found.Groups[1].Value, out var inside) && foundContainers.Add(found.Groups[2].Value.Trim()))
+        {
+            containersFound++;
+            songsFound += inside;
         }
         var batch = Batch.Match(t);
         if (batch.Success) BatchText = $"batch {batch.Groups[1].Value} of {batch.Groups[2].Value}";
@@ -253,16 +274,27 @@ internal sealed class DownloadMonitor : IDisposable
         }
         Downloaded += bytes;
         secondBytes += bytes;
-        window.Enqueue((now, bytes));
-        while (window.Count > 0 && window.Peek().T < now - 10) window.Dequeue();
-        var span = Math.Min(10, Math.Max(1, now));
-        Speed = window.Sum(w => w.Bytes) / span;
         if (bytes > 0 && Phase is "Starting…" or "Looking up songs") Phase = "Downloading";
         while (now >= nextSampleAt)
         {
-            var smooth = Samples.Count < 2 ? Speed : TrailingAverage(15, secondBytes);
-            Samples.Add(new Sample(nextSampleAt, secondBytes, smooth, Done, Failed));
-            Peak = Math.Max(Peak, smooth);
+            // Downloads arrive in bursts (one song, then searching/converting/pausing before the next). The speed
+            // shown is the average of the last 30 seconds that carried data, held steady through those normal
+            // gaps; only a real stop (no data for 90 s) lets it fall to zero.
+            if (secondBytes > 0)
+            {
+                activeTotal++;
+                activeSeconds.Enqueue(secondBytes);
+                while (activeSeconds.Count > 30) activeSeconds.Dequeue();
+                lastActiveSecond = nextSampleAt;
+                Speed = activeSeconds.Average();
+            }
+            else if (lastActiveSecond >= 0 && nextSampleAt - lastActiveSecond > HoldSeconds)
+            {
+                Speed *= 0.85;
+                if (Speed < 2048) { Speed = 0; activeSeconds.Clear(); }
+            }
+            Samples.Add(new Sample(nextSampleAt, secondBytes, Speed, Done, Failed));
+            Peak = Math.Max(Peak, Speed);
             secondBytes = 0;
             nextSampleAt += 1;
             if (Samples.Count > 6 * 3600) Samples.RemoveAt(0);
@@ -437,7 +469,7 @@ internal sealed class ActivityGraph : ThemedControl
         var tiles = new (string Caption, string Value, string Sub, Color Color)[]
         {
             ("SPEED", m is null || !hasRun ? "—" : m.Paused ? "Paused" : m.Running ? Bytes(m.Speed) + "/s" : Bytes(m.AverageSpeed) + "/s",
-                m is null || !hasRun ? "" : m.Running ? $"avg {Bytes(m.AverageSpeed)}/s · peak {Bytes(m.Peak)}/s" : "average of the last run", p.Accent),
+                m is null || !hasRun ? "" : m.Running ? $"overall {Bytes(m.OverallSpeed)}/s incl. gaps · peak {Bytes(m.Peak)}/s" : "average while downloading", p.Accent),
             ("DOWNLOADED", m is null || m.Downloaded == 0 ? "—" : Bytes(m.Downloaded),
                 expected is { } total && m!.Running ? $"of ≈ {Bytes(total)}" : m is { Written: > 0 } ? $"{Bytes(m.Written)} saved" : "", p.Ink),
             ("SONGS", m is null || !hasRun ? "—" : target is { } t ? $"{Math.Min(m.Processed, t)} / {t}" : m.Done.ToString(),
@@ -501,6 +533,7 @@ internal sealed class ActivityGraph : ThemedControl
         var plot = plotRect;
         Ui.FillRound(g, ColorX.Mix(p.Panel, p.Panel2, 0.5), plot, Theme.R(8), ColorX.Mix(p.Line, p.Panel, 0.4));
         DrawRangeChips(g, plot, scale);
+        if (hasRun) DrawTotals(g, plot, m!, scale);
         var all = m?.Samples ?? new List<DownloadMonitor.Sample>();
         if (all.Count < 2)
         {
@@ -516,6 +549,28 @@ internal sealed class ActivityGraph : ThemedControl
             using (var dot = new SolidBrush(led)) g.FillEllipse(dot, 2, Height - footer / 2 - 4, 8, 8);
             Ui.Text(g, m.Result, Fonts.Body(8.75f * scale), new Rectangle(16, Height - footer, Width - 16, footer), p.Muted);
         }
+    }
+
+    /// <summary>Running totals in the top-left of the graph: songs done of the whole queue and size of the whole run.</summary>
+    private void DrawTotals(Graphics g, Rectangle plot, DownloadMonitor m, float scale)
+    {
+        var p = Theme.P;
+        var left = plot.Left + (int)(14 * scale);
+        var right = (rangeChips.Count > 0 ? rangeChips.Min(c => c.Bounds.Left) : plot.Right) - 10;
+        var width = Math.Max(60, right - left);
+        var songs = m.Target is { } t ? $"{Math.Min(m.Done + m.Skipped, t):N0} / {t:N0} songs" : $"{m.Done:N0} song(s)";
+        var size = m.Running && m.ExpectedTotal is { } total ? $"{Bytes(m.Downloaded)} / ≈ {Bytes(Math.Max(total, m.Downloaded))}" : Bytes(m.Downloaded);
+        var big = Fonts.Display(12.5f * scale);
+        var songsW = TextRenderer.MeasureText(songs, big).Width;
+        Ui.Text(g, songs, big, new Rectangle(left, plot.Top + (int)(6 * scale), Math.Min(width, songsW + 4), (int)(24 * scale)), p.Accent2);
+        if (songsW + 24 < width)
+            Ui.Text(g, size, big, new Rectangle(left + songsW + (int)(20 * scale), plot.Top + (int)(6 * scale), width - songsW - (int)(20 * scale), (int)(24 * scale)), p.Ink);
+        var detail = string.Join("  ·  ", new[]
+        {
+            m.Done > 0 ? $"{m.Done:N0} downloaded" : "", m.Skipped > 0 ? $"{m.Skipped:N0} already had" : "", m.Failed > 0 ? $"{m.Failed:N0} failed" : "",
+            m.Written > 0 ? $"{Bytes(m.Written)} saved" : ""
+        }.Where(s => s.Length > 0));
+        if (detail.Length > 0) Ui.Text(g, detail, Fonts.Body(8f * scale), new Rectangle(left, plot.Top + (int)(29 * scale), width, (int)(16 * scale)), p.Muted);
     }
 
     private void DrawRangeChips(Graphics g, Rectangle plot, float scale)
@@ -547,7 +602,7 @@ internal sealed class ActivityGraph : ThemedControl
         start = shown[0].Seconds;
         var spanSec = Math.Max(1, end - start);
         var axisW = (int)(78 * scale);
-        var inner = new Rectangle(plot.Left + axisW, plot.Top + (int)(30 * scale), plot.Width - axisW - 12, plot.Height - (int)(30 * scale) - (int)(22 * scale));
+        var inner = new Rectangle(plot.Left + axisW, plot.Top + (int)(52 * scale), plot.Width - axisW - 12, plot.Height - (int)(52 * scale) - (int)(22 * scale));
         if (inner.Width < 20 || inner.Height < 20) return;
         // bucket to about 2 px per point
         var buckets = Math.Max(2, Math.Min(shown.Count, inner.Width / 2));
@@ -585,31 +640,25 @@ internal sealed class ActivityGraph : ThemedControl
             Ui.Text(g, label, Fonts.Mono(7f * scale), new Rectangle(rx, inner.Bottom + 4, 70, 16), p.Dim, flags);
         }
 
-        // instant bursts (faint bars), then the smooth area + line
-        using (var burst = new SolidBrush(ColorX.Alpha(p.Accent2, 20)))
-        {
-            var bw = Math.Max(1f, inner.Width / (float)buckets - 1);
-            for (var b = 0; b < buckets; b++)
-                if (instant[b] > 0) { var top = Y(instant[b]); g.FillRectangle(burst, X(secs[b]) - bw / 2, top, bw, inner.Bottom - top); }
-        }
+        // the steady speed as an area + line (the per-second bursts are deliberately not drawn)
         var line = Enumerable.Range(0, buckets).Select(b => new PointF(X(secs[b]), Y(smooth[b]))).ToArray();
         using (var area = new GraphicsPath())
         {
             area.AddLine(line[0].X, inner.Bottom, line[0].X, line[0].Y);
-            area.AddCurve(line, 0.35f);
+            area.AddLines(line);
             area.AddLine(line[^1].X, line[^1].Y, line[^1].X, inner.Bottom);
             area.CloseFigure();
             using var fill = new LinearGradientBrush(new Rectangle(inner.X, inner.Y - 1, inner.Width, inner.Height + 2), ColorX.Alpha(p.Accent, 95), ColorX.Alpha(p.Accent, 6), LinearGradientMode.Vertical);
             g.FillPath(fill, area);
         }
-        using (var pen = new Pen(p.Accent, 2f * scale) { LineJoin = LineJoin.Round }) g.DrawCurve(pen, line, 0.35f);
+        using (var pen = new Pen(p.Accent, 2f * scale) { LineJoin = LineJoin.Round }) g.DrawLines(pen, line);
         // run average
         if (m.AverageSpeed > 0)
         {
             var ay = Y(m.AverageSpeed);
             using var avg = new Pen(ColorX.Alpha(p.Ink, 90), 1f) { DashStyle = DashStyle.Dash };
             g.DrawLine(avg, inner.Left, ay, inner.Right, ay);
-            Ui.Text(g, "avg " + Bytes(m.AverageSpeed) + "/s", Fonts.Mono(7f * scale), new Rectangle(inner.Left + 6, (int)ay - 15, 140, 14), p.Muted);
+            Ui.Text(g, "avg " + Bytes(m.AverageSpeed) + "/s while downloading", Fonts.Mono(7f * scale), new Rectangle(inner.Left + 6, (int)(ay - 15 * scale), (int)(260 * scale), (int)(14 * scale)), p.Muted);
         }
         // finished (accent) and failed (red) song markers along the bottom
         foreach (var ev in m.Events)

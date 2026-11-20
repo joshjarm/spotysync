@@ -35,7 +35,7 @@ internal sealed class Tween
 
     private void Stop() { running = false; FrameClock.Unsubscribe(Frame); }
 
-    /// <summary>Smooth ease-in-out of the raw value (for colours/positions).</summary>
+    /// <summary>Smooth ease-in-out of the raw value (for colors/positions).</summary>
     public float Eased => Value * Value * (3 - 2 * Value);
 }
 
@@ -43,7 +43,7 @@ internal sealed class Tween
 /// <summary>
 /// Borderless, click-through helper window (cross-fades, drag previews). Windows normally shows a new window
 /// with its default light background for a frame before the first paint - a bright white flash on a dark
-/// UI. This window starts in the theme's dark colour and stays cloaked (invisible to the compositor)
+/// UI. This window starts in the theme's dark color and stays cloaked (invisible to the compositor)
 /// until its first real frame has been painted.
 /// </summary>
 internal class OverlayWindow : Form
