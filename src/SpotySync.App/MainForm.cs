@@ -63,6 +63,7 @@ public sealed partial class MainForm : Form
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
         Ui.StyleWindow(this);
         BuildUi();
+        InitLive();
         LoadSettingsFields();
         ApplyThemeColors();
         Theme.Changed += OnThemeChanged;
@@ -72,6 +73,8 @@ public sealed partial class MainForm : Form
             try { var web = Path.Combine(settings.DataDirectory, "WebView2"); if (Directory.Exists(web)) Directory.Delete(web, true); } catch { }
             RestorePreviewSnapshot();
             await RefreshStatusAsync();
+            // a restored preview may predate songs downloaded since: bring its library up to date now
+            if (prepared is not null) await RefreshLibraryLiveAsync();
             if (StartupPrompts) await OfferExistingSetupAsync(userInitiated: false);
             statusTimer.Tick += async (_, _) => { if (cancellation is null) await RefreshMusicBeePillAsync(); };
             statusTimer.Start();
@@ -152,14 +155,13 @@ public sealed partial class MainForm : Form
         {
             settings.UiConsoleSimple = simple;
             loadingFields = true; consoleSimpleDefault.Checked = simple; loadingFields = false;
-            miniFeedDirty = true;
             SaveAppearance();
         };
         downloadMonitor.FileArrived += name =>
         {
             // only download-type runs report songs (MusicBee may move files around during other runs)
             var downloading = new[] { "Backing up", "Download", "Soundtrack", "Running complete", "missing" }.Any(w => operationLabel.Contains(w, StringComparison.OrdinalIgnoreCase));
-            if (downloading) AppendLog("Downloaded: " + name + (downloadMonitor.Target is { } t ? $"   {downloadMonitor.Files}/{t}" : ""));
+            if (downloading) AppendLog("Downloaded: " + name + (downloadMonitor.Target is { } t ? $"   {downloadMonitor.Processed}/{t}" : ""));
         };
         console.PreferencesChanged += (detail, times) =>
         {
@@ -211,7 +213,7 @@ public sealed partial class MainForm : Form
         ResumeLayout(true);
         if (index == PageConsole) { console.UnseenIssues = 0; UpdateConsoleBadge(); }
         if (index == PageSettings) settingsView.Relayout();
-        if (index == PageDashboard) { RefreshDashboard(); if (miniFeedDirty) RenderMiniFeed(); }
+        if (index == PageDashboard) RefreshDashboard();
     }
 
     private Control BuildHeader()
@@ -258,10 +260,11 @@ public sealed partial class MainForm : Form
     private Control BuildStatusBar()
     {
         var bar = new StatusBarPanel { Dock = DockStyle.Bottom, Height = 66, Padding = new Padding(22, 0, 22, 0) };
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, BackColor = Color.Transparent };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
+        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, BackColor = Color.Transparent };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 116));
         grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         statusText.Dock = DockStyle.Fill; statusText.Margin = new Padding(0, 10, 8, 10);
@@ -274,17 +277,11 @@ public sealed partial class MainForm : Form
         applyButton.Dock = DockStyle.Fill; applyButton.Margin = new Padding(4, 15, 0, 15); applyButton.Enabled = false; applyButton.AutoSize = false;
         applyButton.Click += async (_, _) => await ApplyAsync();
         tips.SetToolTip(applyButton, "Apply exactly the reviewed preview (Ctrl+Enter)");
+        pauseButton.Dock = DockStyle.Fill; pauseButton.Margin = new Padding(4, 15, 4, 15); pauseButton.AutoSize = false;
         grid.Controls.Add(statusText, 0, 0); grid.Controls.Add(progress, 1, 0); grid.Controls.Add(forceRefresh, 2, 0);
-        grid.Controls.Add(cancelButton, 3, 0);
+        grid.Controls.Add(pauseButton, 3, 0); grid.Controls.Add(cancelButton, 4, 0);
         bar.Controls.Add(grid);
         return bar;
-    }
-
-    private Control BuildConsolePage()
-    {
-        var page = new Panel { BackColor = Color.Transparent, Padding = new Padding(0, 0, 0, 4) };
-        page.Controls.Add(console);
-        return page;
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -332,7 +329,6 @@ public sealed partial class MainForm : Form
         dashPlanStale = true;
         if (prepared is not null) { var selected = planGrid.CurrentRow?.Tag as PlaylistPlan; PopulatePlan(prepared.Plan, selected?.Name); }
         else ShowSelectedDetails();
-        RenderMiniFeed();
         UpdateSafetyPill();
         swatches.SelectedId = settings.UiTheme;
         UpdateAccentSwatch();
@@ -493,40 +489,42 @@ public sealed partial class MainForm : Form
         SetBusy(true);
         console.BeginRun(label);
         WriteLogFile(label + "…");
-        downloadMonitor.Start(label, WatchRoots(), this);
+        downloadMonitor.Start(label, settings.ResolvePath(settings.MusicFolder), Array.Empty<string>(), this);
+        UpdatePauseButton();
         var outcome = "ok";
         try { await operation(cancellation.Token); }
         catch (OperationCanceledException) { outcome = "cancelled"; }
         catch (Exception ex) { AppendLog("ERROR: " + ex.Message); outcome = "failed"; }
         finally
         {
-            downloadMonitor.Stop();
-            var (warnings, errors, issues) = console.EndRun(outcome);
-            WriteLogFile(outcome switch { "cancelled" => label + " cancelled.", "failed" => label + " failed.", _ => label + " complete." });
-            if (warnings + errors > 0)
+            DownloadProcesses.Reset(); // never leave a paused (suspended) downloader behind
+            if (IsDisposed || Disposing)
             {
-                WriteLogFile($"----- Completed with {errors} error(s) and {warnings} warning(s) -----");
-                foreach (var issue in issues) WriteLogFile("SUMMARY: " + issue);
+                // the window was closed while this ran: nothing on screen is left to update
+                cancellation?.Dispose(); cancellation = null;
+                WriteLogFile(label + " stopped because SpotySync was closed.");
             }
-            cancellation.Dispose(); cancellation = null;
-            SetBusy(false, outcome, warnings, errors);
-            if ((errors > 0 || outcome == "failed") && !StayOnDashboard) SelectPage(PageConsole);
-            await RefreshStatusAsync();
+            else await FinishRunAsync(label, outcome);
         }
     }
 
-    /// <summary>Folders the download graph watches: the soundtrack root and the music folder, without nesting duplicates.</summary>
-    private List<string> WatchRoots()
+    private async Task FinishRunAsync(string label, string outcome)
     {
-        var roots = new List<string>();
-        foreach (var folder in new[] { settings.ResolvePath(settings.SoundtrackFolder), settings.ResolvePath(settings.MusicFolder) }
-                     .Where(Directory.Exists).OrderBy(x => x.Length))
+        downloadMonitor.Stop();
+        var (warnings, errors, issues) = console.EndRun(outcome);
+        WriteLogFile(outcome switch { "cancelled" => label + " cancelled.", "failed" => label + " failed.", _ => label + " complete." });
+        if (warnings + errors > 0)
         {
-            var normalized = folder.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            if (!roots.Any(r => normalized.StartsWith(r.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
-                roots.Add(folder);
+            WriteLogFile($"----- Completed with {errors} error(s) and {warnings} warning(s) -----");
+            foreach (var issue in issues) WriteLogFile("SUMMARY: " + issue);
         }
-        return roots;
+        cancellation?.Dispose(); cancellation = null;
+        SetBusy(false, outcome, warnings, errors);
+        if ((errors > 0 || outcome == "failed") && !StayOnDashboard) SelectPage(PageConsole);
+        UpdatePauseButton();
+        await RefreshStatusAsync();
+        if (IsDisposed) return;
+        if (downloadMonitor.Done > 0 && prepared is not null) await RefreshLibraryLiveAsync(); // new songs show up right away
     }
 
     private void SetBusy(bool busy, string outcome = "", int warnings = 0, int errors = 0)
@@ -534,6 +532,7 @@ public sealed partial class MainForm : Form
         progress.Active = busy;
         cancelButton.Enabled = busy;
         foreach (var button in busyButtons) button.Enabled = !busy;
+        UpdateLibraryActions();
         UpdateApplyButtons();
         if (busy)
         {
@@ -583,6 +582,7 @@ public sealed partial class MainForm : Form
         await RefreshMusicBeePillAsync();
         UpdateSafetyPill();
         UpdateToolsPill();
+        EnsureLibraryWatcher();
         await LoadLikedIndexAsync();
         await ApplyPendingMusicBeeFoldersAsync();
         RefreshSoundtrackList();
@@ -642,6 +642,7 @@ public sealed partial class MainForm : Form
             var cache = await Task.Run(() => JsonStore.Load(path, () => new LikedTrackCache()));
             likedIndexed = cache.Tracks.Count;
             likedRefreshed = cache.RefreshedAt;
+            IndexTracks(cache.Tracks); // song names for links in the status bar and the download graph
         }
         catch { likedIndexed = -1; }
     }
@@ -667,9 +668,7 @@ public sealed partial class MainForm : Form
 
     private void OnLogAppended(LogEntry entry)
     {
-        if (cancellation is not null && entry.Level != LogLevel.Header)
-            statusText.Detail = (entry.Tag.Length > 0 ? entry.Tag.ToLowerInvariant() + " · " : "") + entry.Text + (entry.Repeat > 1 ? $"  ×{entry.Repeat}" : "");
-        miniFeedDirty = true;
+        if (cancellation is not null && entry.Level != LogLevel.Header) statusText.Detail = StatusLine(entry);
         downloadMonitor.NoteLog(entry.Text);
     }
 

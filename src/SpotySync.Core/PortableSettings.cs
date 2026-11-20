@@ -52,6 +52,10 @@ public sealed class PortableSettings
     public bool UiConsoleDownloaderDetail { get; set; }
     public bool UiConsoleTimestamps { get; set; } = true;
     public bool UiConsoleSimple { get; set; } = true;
+    /// <summary>Console page shows the download graph beside the log.</summary>
+    public bool UiConsoleSplit { get; set; }
+    /// <summary>Download graph time range in seconds (0 = whole run).</summary>
+    public int UiActivityRange { get; set; }
 
     public string DataDirectory => ResolvePath("Data");
     public string TokenPath => Path.Combine(DataDirectory, "spotify-token.json");
@@ -127,6 +131,8 @@ public sealed class PortableSettings
         settings.UiConsoleDownloaderDetail = GetBool(values, "Appearance", "ConsoleDownloaderDetail", settings.UiConsoleDownloaderDetail);
         settings.UiConsoleTimestamps = GetBool(values, "Appearance", "ConsoleTimestamps", settings.UiConsoleTimestamps);
         settings.UiConsoleSimple = GetBool(values, "Appearance", "ConsoleSimple", settings.UiConsoleSimple);
+        settings.UiConsoleSplit = GetBool(values, "Appearance", "ConsoleSplit", settings.UiConsoleSplit);
+        settings.UiActivityRange = int.TryParse(Get(values, "Appearance", "ActivityRange", "0"), out var range) ? Math.Clamp(range, 0, 86400) : 0;
         return settings;
     }
 
@@ -193,6 +199,8 @@ DashboardCards={UiDashboardCards}
 ConsoleDownloaderDetail={UiConsoleDownloaderDetail}
 ConsoleTimestamps={UiConsoleTimestamps}
 ConsoleSimple={UiConsoleSimple}
+ConsoleSplit={UiConsoleSplit}
+ActivityRange={UiActivityRange}
 """;
         File.WriteAllText(FilePath, text.Replace("\n", Environment.NewLine));
     }

@@ -82,7 +82,32 @@ public sealed class Downloader
         var spotifyUrls = cleaned.Where(IsSpotifyLink).ToList();
         var mediaUrls = cleaned.Where(x => !IsSpotifyLink(x)).ToList();
         var results = new List<DownloadRunResult>();
-        if (spotifyUrls.Count > 0) results.Add(await RunAsync(spotifyUrls, expectedTracks, cancellationToken));
+        if (spotifyUrls.Count > 0)
+        {
+            var batch = await RunAsync(spotifyUrls, expectedTracks, cancellationToken);
+            if (spotifyUrls.Count > 1 && batch.ExitCode != 0 && batch.ChangedAudio.Count == 0)
+            {
+                // One unreadable link (deleted/private playlist, spotDL parse error) aborts a whole
+                // batch before anything downloads. Retry link by link so only the bad one is lost.
+                log($"The batch of {spotifyUrls.Count} links failed; retrying them one at a time so a single bad link cannot block the rest.");
+                var singles = new List<DownloadRunResult>();
+                var failed = new List<string>();
+                for (var i = 0; i < spotifyUrls.Count; i++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var url = spotifyUrls[i];
+                    log($"Link {i + 1} of {spotifyUrls.Count}: {url}");
+                    var one = await RunAsync(new[] { url }, expectedTracks, cancellationToken);
+                    singles.Add(one);
+                    if (one.ExitCode != 0 && one.ChangedAudio.Count == 0) failed.Add(url);
+                }
+                foreach (var url in failed)
+                    log($"ERROR: Could not download {url}. The link may be deleted, private or unreadable by the downloader; the other links were still processed.");
+                batch = Merge(singles);
+                if (failed.Count == 0) batch.ExitCode = 0; // the batch failure was transient
+            }
+            results.Add(batch);
+        }
         if (mediaUrls.Count > 0) results.Add(await RunYtDlpAsync(mediaUrls, cancellationToken));
         return Merge(results);
     }
@@ -156,7 +181,8 @@ public sealed class Downloader
         foreach (var url in urls) start.ArgumentList.Add(url);
 
         log("Starting direct media download with yt-dlp" + (cookieBrowser is null ? "." : $" and {cookieBrowser} cookies."));
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start yt-dlp.");
+        await DownloadProcesses.WaitIfPausedAsync(cancellationToken);
+        using var process = DownloadProcesses.Start(start);
         var stdout = PumpAsync(process.StandardOutput, "download", cancellationToken);
         var stderr = PumpAsync(process.StandardError, "download", cancellationToken);
         List<string> output;
@@ -274,7 +300,8 @@ public sealed class Downloader
             await WarmUpPoTokenHelperAsync(toolDirectory, cancellationToken); // keep it warm for this batch
         }
 
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start the configured downloader.");
+        await DownloadProcesses.WaitIfPausedAsync(cancellationToken);
+        using var process = DownloadProcesses.Start(start);
         var stdout = isSpot2Yt
             ? PumpSpot2YtAsync(process.StandardOutput, process.StandardInput, cancellationToken)
             : PumpAsync(process.StandardOutput, "download", cancellationToken);
@@ -500,7 +527,7 @@ public sealed class Downloader
         start.ArgumentList.Add("--dump-single-json");
         start.ArgumentList.Add("--no-warnings");
         start.ArgumentList.Add(searchPrefix + count + ":" + query);
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start yt-dlp YouTube search.");
+        using var process = DownloadProcesses.Start(start);
         var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
         try { await process.WaitForExitAsync(cancellationToken); }
@@ -545,7 +572,7 @@ public sealed class Downloader
             RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true
         };
         foreach (var argument in new[] { "--dump-single-json", "--skip-download", "--no-warnings", album.Url }) start.ArgumentList.Add(argument);
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not inspect YouTube album chapters.");
+        using var process = DownloadProcesses.Start(start);
         var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
         try { await process.WaitForExitAsync(cancellationToken); }
@@ -647,7 +674,7 @@ public sealed class Downloader
                      "-metadata", "title=" + track.Title, "-metadata", "artist=" + artist, "-metadata", "album=" + track.Album,
                      "-metadata:s:a:0", "title=" + track.Title, "-metadata:s:a:0", "artist=" + artist, "-metadata:s:a:0", "album=" + track.Album,
                      output }) start.ArgumentList.Add(value);
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start ffmpeg metadata tagging.");
+        using var process = DownloadProcesses.Start(start);
         var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
         await process.WaitForExitAsync(cancellationToken);

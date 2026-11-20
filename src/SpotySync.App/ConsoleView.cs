@@ -244,6 +244,8 @@ internal sealed class ConsoleView : Panel
 
     public event Action<LogEntry>? Appended;
     public event Action? CountsChanged;
+    /// <summary>The log was cleared or trimmed (followers should re-read <see cref="Entries"/>).</summary>
+    public event Action? Reset;
     public event Action<bool, bool>? PreferencesChanged; // detail, timestamps
     public string LogDirectory { get; set; } = "";
     public int Warnings { get; private set; }
@@ -444,7 +446,7 @@ internal sealed class ConsoleView : Panel
         }
 
         entries.Add(entry);
-        if (entries.Count > MaxEntries) { entries.RemoveRange(0, 1000); Rerender(); Appended?.Invoke(entry); return; }
+        if (entries.Count > MaxEntries) { entries.RemoveRange(0, 1000); Rerender(); Reset?.Invoke(); return; }
         if (Passes(entry)) AppendLine(entry);
         else if (entry.IsDetail) { hiddenDetail++; UpdateHiddenNote(); }
         Appended?.Invoke(entry);
@@ -551,6 +553,16 @@ internal sealed class ConsoleView : Panel
         warnChip.Count = null; errorChip.Count = null; summary.Visible = false;
         CountsChanged?.Invoke();
         Rerender();
+        Reset?.Invoke();
+    }
+
+    /// <summary>Adds a control (e.g. a view toggle) to the right end of the console toolbar.</summary>
+    public void AddToolbarControl(Control control)
+    {
+        var toolbar = Controls.OfType<WrapRow>().FirstOrDefault();
+        if (toolbar is null) return;
+        control.Margin = new Padding(0, 0, 8, 8);
+        toolbar.Controls.Add(control);
     }
 
     private void OpenLogs()

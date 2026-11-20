@@ -10,9 +10,9 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 }
 $distRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot "dist"))
 $packageName = "SpotySync-$Version-win-x64"
-$packageRoot = [IO.Path]::GetFullPath((Join-Path $distRoot $packageName))
 $zipPath = [IO.Path]::GetFullPath((Join-Path $distRoot "$packageName.zip"))
 $cacheRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot ".build-cache"))
+$packageRoot = [IO.Path]::GetFullPath((Join-Path (Join-Path $cacheRoot "package") $packageName)) # staging; the zip and dist copy are made from it
 $publishRoot = [IO.Path]::GetFullPath((Join-Path $cacheRoot "publish"))
 $uiCaptureRoot = [IO.Path]::GetFullPath((Join-Path $cacheRoot "ui-captures"))
 $toolSeedRoot = [IO.Path]::GetFullPath((Join-Path $cacheRoot "tool-seed"))
@@ -26,7 +26,7 @@ function Assert-ChildPath([string]$Path, [string]$Parent) {
     }
 }
 
-Assert-ChildPath $packageRoot $distRoot
+Assert-ChildPath $packageRoot $cacheRoot
 Assert-ChildPath $publishRoot $cacheRoot
 Assert-ChildPath $uiCaptureRoot $cacheRoot
 Assert-ChildPath $toolSeedRoot $cacheRoot
@@ -165,6 +165,13 @@ foreach ($tool in @("ffmpeg.exe", "ffprobe.exe", "deno.exe", "yt-dlp.exe")) {
 $bgutilCache = Join-Path $cacheRoot "bgutil-ytdlp-pot-provider-2.0.2.zip"
 $bgutilUrl = "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/2.0.2/bgutil-ytdlp-pot-provider.zip"
 $bgutilSha256 = "a26b980bf6d8e8400d8f21445daa4d8381bf6183d20f0be309391f86b31e27ef"
+$toolsCache = Join-Path $projectRoot ".tools-cache"
+function Copy-FromToolsCache([string]$target) {
+    # reuse a verified download from .tools-cache (fetch-tools.ps1) before going online
+    $seed = Join-Path $toolsCache (Split-Path -Leaf $target)
+    if (-not (Test-Path -LiteralPath $target) -and (Test-Path -LiteralPath $seed)) { Copy-Item -LiteralPath $seed -Destination $target }
+}
+Copy-FromToolsCache $bgutilCache
 if (-not (Test-Path -LiteralPath $bgutilCache) -or (Get-FileHash -LiteralPath $bgutilCache -Algorithm SHA256).Hash -ne $bgutilSha256) {
     Invoke-WebRequest -Uri $bgutilUrl -OutFile $bgutilCache -UseBasicParsing
 }
@@ -177,6 +184,7 @@ Copy-Item -LiteralPath $bgutilCache -Destination (Join-Path $pluginRoot "bgutil-
 $bgutilSourceCache = Join-Path $cacheRoot "bgutil-ytdlp-pot-provider-2.0.2-source.zip"
 $bgutilSourceUrl = "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/2.0.2.zip"
 $bgutilSourceSha256 = "df68ee6210e4960757bceae298927fb2ebd4d5cd9d390f9ff3a8287b0d2d1054"
+Copy-FromToolsCache $bgutilSourceCache
 if (-not (Test-Path -LiteralPath $bgutilSourceCache) -or (Get-FileHash -LiteralPath $bgutilSourceCache -Algorithm SHA256).Hash -ne $bgutilSourceSha256) {
     Invoke-WebRequest -Uri $bgutilSourceUrl -OutFile $bgutilSourceCache -UseBasicParsing
 }
@@ -202,15 +210,38 @@ if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force 
 Move-Item -LiteralPath $stagingZipPath -Destination $zipPath
 $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
+# Ready-to-run copy: releases\SpotySync-<version>-win-x64. Program files are (re)placed; anything the app created
+# there (SpotySync.ini, Data, Logs, Tools\browser_options.txt, credentials) is never in the package, so it stays.
+$releaseRoot = [IO.Path]::GetFullPath((Join-Path $distRoot $packageName))
+Assert-ChildPath $releaseRoot $distRoot
+New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
+$releaseErrors = @()
+Get-ChildItem -LiteralPath $packageRoot -Recurse -File | ForEach-Object {
+    $relative = $_.FullName.Substring($packageRoot.Length).TrimStart('\')
+    $destination = Join-Path $releaseRoot $relative
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+    try { Copy-Item -LiteralPath $_.FullName -Destination $destination -Force -ErrorAction Stop }
+    catch { $releaseErrors += $relative }
+}
+if ($releaseErrors.Count -gt 0) { Write-Warning "Could not replace (is SpotySync running from there?): $($releaseErrors -join ', ')" }
+
 # Keep only the newest compressed release. The unpacked package, older releases,
 # build cache, and compiler outputs are all reproducible and needlessly large.
 # Only SpotySync-* packages are removed: loose tools or files the user keeps in dist stay.
-Get-ChildItem -LiteralPath $distRoot -Force | Where-Object { $_.FullName -ne $zipPath -and $_.Name -like "SpotySync-*" } | ForEach-Object {
+# An unpacked package that has been run (it holds SpotySync.ini, Data or Logs) is someone's working copy with
+# their login and data - never delete that.
+Get-ChildItem -LiteralPath $distRoot -Force | Where-Object { $_.FullName -ne $zipPath -and $_.FullName -ne $releaseRoot -and $_.Name -like "SpotySync-*" } | ForEach-Object {
     Assert-ChildPath $_.FullName $distRoot
-    Remove-Item -LiteralPath $_.FullName -Recurse -Force
+    $inUse = $_.PSIsContainer -and (
+        (Test-Path -LiteralPath (Join-Path $_.FullName "SpotySync.ini")) -or
+        (Test-Path -LiteralPath (Join-Path $_.FullName "Data")) -or
+        (Test-Path -LiteralPath (Join-Path $_.FullName "Logs")))
+    if ($inUse) { Write-Host "Kept (in use, holds settings/data): $($_.FullName)" }
+    else { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
 }
 # bin\ and obj\ are left alone: the locally built app folder holds the user's settings, login and data.
 if (Test-Path -LiteralPath $cacheRoot) { Remove-Item -LiteralPath $cacheRoot -Recurse -Force }
 
+Write-Host "APP (unzipped):   $releaseRoot"
 Write-Host "ZIP:              $zipPath"
 Write-Host "ZIP SHA-256:      $zipHash"

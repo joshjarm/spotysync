@@ -1,6 +1,6 @@
 # SpotySync — Project State
 
-_Last updated: 2026-11-12_
+_Last updated: 2026-11-20_
 
 ## Overview
 Portable Windows app (C# WinForms) that keeps Spotify playlists, MusicBee static playlists and
@@ -258,3 +258,44 @@ a small local-only MusicBee bridge plugin. Full user documentation is in `README
 - Quality check now classifies each <200 kbps song by probing its YouTube URL (comment tag) with cookies: "no 256k version on YouTube" vs "missed an available 256k version" (first 15 per batch).
 - 2026-11-19 later: warm-up alone did not fix the app (its check finished in ~7 s with no "[pot" line, i.e. the bgutil provider was never consulted), although the same check passes from console, windowed and Explorer-environment test parents. Now yt-dlp/spotDL get explicit `--js-runtimes deno:<Tools/deno.exe>` and `--extractor-args youtubepot-bgutilscript:server_home=<~/bgutil-ytdlp-pot-provider/server>` (forward slashes because spotDL shlex-splits --yt-dlp-args), and a failed Premium check re-runs yt-dlp with -v and logs "Premium debug |" lines (plugin dirs, PO token providers, jsc, deno).
 - ACTUAL ROOT CAUSE (confirmed): the bgutil plugin zip had been written to %APPDATA%\yt-dlp\plugins from inside an MSIX-packaged (sandboxed) app, so Windows virtualized the write into that app's private %LOCALAPPDATA%\Packages\...\LocalCache folder. Tools launched from that app saw it; SpotySync launched normally did not ("Plugin directories: none" → no PO token → format 251). The same applies to anything else installed under AppData from a packaged app. Shipping the plugin beside the tools avoids the problem. Fix: plugin now ships in Tools\yt-dlp-plugins\bgutil-ytdlp-pot-provider.zip (searched next to yt-dlp.exe and spotdl.exe); build-release.ps1 downloads/pins it (sha256 a26b980b…e27ef). Verified outside the sandbox (process created via WMI): yt-dlp lists 774, spotDL download measured 252 kbps.
+
+## 2026-11-20 — 1.5.1: download activity overhaul, dashboard grid, live library
+- The user's working copy on this PC is `dist\SpotySync-1.5.0-win-x64` (login, Data, Logs). build-release.ps1 used to
+  delete every `SpotySync-*` folder in dist and the same-version package folder at start: both now skip/refuse a folder
+  holding SpotySync.ini / Data / Logs. Version → 1.5.1. Agent shells here cannot reach nuget.org (WinError 10013 —
+  Portmaster firewall prompts); run the build from the user's terminal.
+- `DownloadActivity.cs` replaces DownloadMonitor/ActivityGraph (old ones removed from Activity.cs). Speed is measured
+  from growing temp files: spotDL writes yt-dlp `.part` files into `%USERPROFILE%\.spotdl\temp`; yt-dlp direct writes
+  `.part` in the music folder. The old monitor watched the Soundtrack root (= C:\Users\<user> on this PC → whole
+  profile) and counted every write (2 GB for 3 songs, spikes). Shown speed = 10 s average, graph = 15 s average +
+  faint per-second bars; songs done (new audio files) / failed (LookupError, AudioProviderError, ERROR: [youtube]) /
+  skipped vs queue ("Download queue: N song(s)." logged by DownloadLinksAsync; also "N to download", "Quality
+  upgrade: N song"); current song = next in spotDL's "Processing query" order (spotDL resolves all queries first,
+  then downloads in order with --threads 1); size estimates from Spotify durations × observed bytes/ms (≈160 kbps
+  until songs finish); ETA from time per song. Ranges 1m/5m/15m/1h/All (`[Appearance] ActivityRange`), hover
+  read-out, song markers, pause banner. Full screen: `ActivityWindow` (F11 / Esc / Space = pause), from the module
+  header button or double-click on the graph. Console page: "Show graph" splits the page (`ConsoleSplit`).
+- Pause: `SpotySync.Core.DownloadProcesses` — Downloader starts spotDL/yt-dlp/ffmpeg/search via
+  `DownloadProcesses.Start` (tracked); Pause = NtSuspendProcess on each process tree (Toolhelp snapshot); new
+  processes and the next batch wait (`WaitIfPausedAsync`); RunBusyAsync always `Reset()`s at the end. Status-bar
+  Pause/Resume button. Core test suspends/resumes a real ping process.
+- Dashboard grid (`CardGrid` in Ui.cs) now positional: each card has a column + vertical order (its centre); cards
+  stack per column in order. Layout string `[-][~]id:span:height:col:order` (reading order; "~" = minimized; old
+  strings without col/order are packed once). Dragging moves the real card (no overlay ghost), others glide live, a
+  dashed placeholder shows the drop spot; a dragged card goes above another once its top edge is above that card's
+  middle. Edge auto-scroll. Card header buttons (`Card.HeaderActions`): minimize/restore on every module (also
+  double-click the title), full screen on Download activity, open-Console on Console.
+- Dashboard Console module = `LogFeed` (every entry incl. downloader detail, time + tag, incremental, follows only
+  when scrolled to the bottom). ConsoleView gained `Reset` event + `AddToolbarControl`.
+- Status bar: Spotify track links get "Title — Artists  ·  " in front (track index from liked cache + preview).
+- Library: ROOT CAUSE of "library never updates": `Data\last-preview.json` (restored at launch) froze the library,
+  and Analyse reused it. Now `LibraryScanner.ReconcileAsync` (new audio in the music folder probed with ffprobe,
+  missing files dropped only if their drive exists) runs at startup, after every run that wrote songs, on Analyse,
+  and live via a FileSystemWatcher (2.5 s debounce, 6 s during runs); preview plan rebuilt on a worker thread unless
+  applied. `MainForm.LiveLibrary` (off in the smoke test). Library rows: checkbox = selection (nothing ticked by
+  default, every tab), Select all ⇄ Deselect (n), Download/Save/Copy/Export use ticked rows; excluded rows have no box.
+  `InsightTable.ReplaceItems` keeps scroll/selection on live refreshes.
+- Tests: 45 core tests; smoke `ValidateLiveFeatures` (drag middle card under left one, minimize, full console,
+  status names, library select, console split, simulated download run, full-screen window).
+- 2026-11-20 — 1.5.2: "Show graph" crashed (CrossFade added its FadeLayer to a SplitContainer, whose Controls are read-only); CrossFade now climbs to a parent that accepts children and falls back to an instant change. Closing the window during a run crashed in RunBusyAsync's finally (EndRun on a disposed console); the end-of-run work moved to FinishRunAsync and is skipped once the form is disposed. The user runs from dist\SpotySync-1.5.1-win-x64 (in use, kept by the build).
+- 2026-11-20 — Standing rule: after every code change, run build-release.ps1 (from the user's terminal on this PC). Besides the dist zip it now fills dist\SpotySync-<version>-win-x64 (was releases\ briefly) with the ready-to-run app (program files replaced; SpotySync.ini/Data/Logs kept). releases/ is git-ignored.

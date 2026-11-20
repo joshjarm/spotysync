@@ -12,13 +12,14 @@ public sealed partial class MainForm
         public required Card Card { get; init; }
         public int DefaultSpan { get; init; }
         public int DefaultHeight { get; init; }
+        public Card.HeaderAction? MinimizeAction { get; set; }
     }
 
     private static readonly string[] DefaultDashOrder = ["actions", "soundtrack", "console", "activity", "preview", "library"];
     /// <summary>Default dashboard: Quick actions (wide) + Soundtrack Saver, then Console, Download activity and Sync preview; Library hidden.</summary>
     private const string DefaultDashLayout = "actions:2:320,soundtrack:1:320,console:1:480,activity:1:480,preview:1:480,-library:2:420";
     private const int MinCardHeight = 180, MaxCardHeight = 900, HeightSnap = 20;
-    private readonly CardGrid dashGrid = new() { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 6, 12) };
+    private readonly CardGrid dashGrid = new() { Dock = DockStyle.Fill, Padding = new Padding(0, 0, 6, 12), MinCardHeight = MinCardHeight, MaxCardHeight = MaxCardHeight, HeightSnap = HeightSnap };
     private readonly List<DashCard> dashCards = new();
     private readonly List<Button> busyButtons = new();
     private readonly RoundedButton dashboardApplyButton = RoundedButton.Make("Apply plan", ButtonKind.Secondary, Glyph.Check);
@@ -31,20 +32,15 @@ public sealed partial class MainForm
     private PlaylistPlan? dashPlanShown;
     private bool dashPlanStale; // colours or applied state changed: rewrite the open overview
     private readonly LibraryStats libraryStats = new() { Dock = DockStyle.Fill };
-    private readonly RichTextBox miniFeed = new();
-    private bool miniFeedDirty;
-    private readonly System.Windows.Forms.Timer miniFeedTimer = new() { Interval = 500 };
+    private LogFeed? dashFeed;
+    private ActivityWindow? activityWindow;
 
-    // drag / resize state
-    private DashCard? dragCard;
-    private Point dragStartScreen, grabOffset;
-    private bool dragging, resizing;
-    private DragGhost? ghost, marker;
-    private (DashCard Target, bool After)? dropTarget;
-    private (int Span, int Height) resizeTo;
-    // Gestures are tracked by polling the cursor: overlay windows can steal mouse capture, so
-    // MouseMove/MouseUp on the card are not reliable once the preview is showing.
-    // Indirection so UI tests can drive a gesture without moving the real mouse.
+    // drag / resize state (the grid moves the real card; this only tracks the mouse)
+    private DashCard? gestureModule;
+    private bool gesturePending, dragging, resizing;
+    private Point gestureStartScreen, grabOffset;
+    // Gestures are tracked by polling the cursor on the display frame clock, so they stay smooth and never
+    // depend on which control holds mouse capture. Indirection so UI tests can drive a gesture.
     private Func<Point> gestureCursor = () => Cursor.Position;
     private Func<bool> gestureButtonDown = PhysicalPrimaryButtonDown;
 
@@ -74,7 +70,11 @@ public sealed partial class MainForm
 
         // Download activity (live graph)
         activityGraph.Monitor = downloadMonitor;
-        AddDashCard("activity", "Download activity", "Live", Glyph.Download, activityGraph, 2, 320);
+        activityGraph.Range = settings.UiActivityRange;
+        activityGraph.RangeChanged += SaveActivityRange;
+        activityGraph.FullScreenRequested += OpenActivityFullScreen;
+        AddDashCard("activity", "Download activity", "Live", Glyph.Download, activityGraph, 2, 320,
+            new Card.HeaderAction { Glyph = Glyph.Expand, Tip = "Full screen (double-click the graph too)", Click = OpenActivityFullScreen });
 
         // Sync preview: playlist list, or one playlist's planned changes (overview without leaving the dashboard)
         var previewBody = new Panel();
@@ -113,19 +113,12 @@ public sealed partial class MainForm
         // Soundtrack Saver
         AddDashCard("soundtrack", "Soundtrack Saver", "Own folder per soundtrack", Glyph.Music, BuildSoundtrackCard(), 1, 340);
 
-        // Console
-        miniFeed.ReadOnly = true; miniFeed.BorderStyle = BorderStyle.None; miniFeed.ScrollBars = RichTextBoxScrollBars.Vertical;
-        miniFeed.WordWrap = true; miniFeed.Dock = DockStyle.Fill; miniFeed.DetectUrls = false; // wraps so a 1-column module stays readable
-        Ui.DarkScrollbars(miniFeed);
+        // Console: the complete log, every line (the Console page has the filters)
+        dashFeed = new LogFeed(console) { Dock = DockStyle.Fill };
         var feedHost = new Panel();
-        miniFeed.Cursor = Cursors.Hand;
-        miniFeed.MouseUp += (_, _) => { if (miniFeed.SelectionLength == 0) SelectPage(PageConsole); };
-        tips.SetToolTip(miniFeed, "Click to open the Console");
-        feedHost.Controls.Add(miniFeed);
-        AddDashCard("console", "Console", "What's happening", Glyph.Console, feedHost, 2, 300);
-        miniFeedTimer.Tick += (_, _) => { if (miniFeedDirty && currentPage == PageDashboard && miniFeed.SelectionLength == 0) RenderMiniFeed(); };
-        miniFeed.KeyDown += (_, e) => ConsoleView.CopyKeys(miniFeed, e);
-        miniFeedTimer.Start();
+        feedHost.Controls.Add(dashFeed);
+        AddDashCard("console", "Console", "Everything, live", Glyph.Console, feedHost, 2, 300,
+            new Card.HeaderAction { Glyph = Glyph.Open, Tip = "Open the Console page (filters, search, logs)", Click = () => SelectPage(PageConsole) });
 
         // Library tools
         var libraryBody = new Panel();
@@ -138,14 +131,31 @@ public sealed partial class MainForm
         libraryBody.Controls.Add(libraryStats); libraryBody.Controls.Add(libraryFooter);
         AddDashCard("library", "Library tools", "Find gaps", Glyph.Library, libraryBody, 1, 300);
 
-        dashGrid.Resize += (_, _) => { if (!dragging && !resizing) dashGrid.PerformLayout(); };
+        dashGrid.Resize += (_, _) => { if (!dashGrid.Gesturing) dashGrid.PerformLayout(); };
         page.Controls.Add(dashGrid);
         ApplyDashboardLayout();
         return page;
     }
 
+    private void SaveActivityRange(int seconds)
+    {
+        settings.UiActivityRange = seconds;
+        activityGraph.Range = seconds;
+        if (consoleGraph is not null) consoleGraph.Range = seconds;
+        SaveAppearance();
+    }
+
+    /// <summary>Opens (or brings back) the full-screen download activity window.</summary>
+    private void OpenActivityFullScreen()
+    {
+        if (activityWindow is { IsDisposed: false }) { activityWindow.Activate(); return; }
+        activityWindow = new ActivityWindow(downloadMonitor, settings.UiActivityRange, TogglePause, () => cancellation?.Cancel(), () => CanPause, SaveActivityRange);
+        activityWindow.FormClosed += (_, _) => activityWindow = null;
+        activityWindow.ShowFullScreen(this);
+    }
+
     /// <summary>True when a module is shown on the dashboard.</summary>
-    private bool IsDashModuleVisible(string id) => DashLayouts().Any(l => l.Id == id && l.Visible);
+    private bool IsDashModuleVisible(string id) => DashLayouts().Any(l => l.Id == id && l.Visible && !l.Minimized);
 
     /// <summary>Stay on the dashboard (instead of jumping pages) while the user watches it with the Console module.</summary>
     private bool StayOnDashboard => currentPage == PageDashboard && IsDashModuleVisible("console");
@@ -197,31 +207,39 @@ public sealed partial class MainForm
         FillDetailRows(dashDetailTable, dashDetailSummary, item);
     }
 
-    private void AddDashCard(string id, string title, string eyebrow, string glyph, Control body, int span, int height)
+    private void AddDashCard(string id, string title, string eyebrow, string glyph, Control body, int span, int height, params Card.HeaderAction[] extra)
     {
         var card = new Card { Title = title, Eyebrow = eyebrow, Glyph = glyph, Name = "card-" + id, Resizable = true, HoverHighlight = true, Inner = new Padding(16, 10, 16, 24) };
         body.Dock = DockStyle.Fill;
         card.Controls.Add(body);
         var module = new DashCard { Id = id, Title = title, Card = card, DefaultSpan = span, DefaultHeight = height };
+        // header buttons, right to left: minimize, then any extras (full screen…)
+        module.MinimizeAction = new Card.HeaderAction { Glyph = Glyph.Minimize, Tip = "Minimize (double-click the title too)", Click = () => ToggleDashCardMinimized(id) };
+        card.HeaderActions.Add(module.MinimizeAction);
+        card.HeaderActions.AddRange(extra);
+        card.HeaderDoubleClick += () => ToggleDashCardMinimized(id);
         var menu = Ui.Menu();
+        var minimizeItem = new ToolStripMenuItem("Minimize", null, (_, _) => ToggleDashCardMinimized(id));
         var widthMenu = new ToolStripMenuItem("Width");
         foreach (var (label, s) in new[] { ("Narrow (1 column)", 1), ("Wide (2 columns)", 2), ("Full width", 3) })
             widthMenu.DropDownItems.Add(label, null, (_, _) => SetDashCardSize(id, s, null));
         var heightMenu = new ToolStripMenuItem("Height");
         foreach (var (label, h) in new[] { ("Short", 220), ("Medium", 320), ("Tall", 440), ("Extra tall", 600) })
             heightMenu.DropDownItems.Add(label, null, (_, _) => SetDashCardSize(id, null, h));
+        menu.Items.Add(minimizeItem);
         menu.Items.Add(widthMenu); menu.Items.Add(heightMenu);
         menu.Items.Add("Move earlier", null, (_, _) => MoveDashCard(id, -1));
         menu.Items.Add("Move later", null, (_, _) => MoveDashCard(id, +1));
         menu.Items.Add("Hide this module", null, (_, _) => SetDashCardVisible(id, false));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Customize dashboard…", null, (_, _) => GoToSetting("dashboard modules"));
-        menu.Items.Add("Reset dashboard layout", null, (_, _) => { settings.UiDashboardCards = ""; ApplyDashboardLayout(); SaveAppearance(); RebuildCardEditor(); });
+        menu.Items.Add("Reset dashboard layout", null, (_, _) => { settings.UiDashboardCards = ""; dashGrid.AnimateNextLayout = true; ApplyDashboardLayout(); SaveAppearance(); RebuildCardEditor(); });
+        menu.Opening += (_, _) => minimizeItem.Text = card.Minimized ? "Restore" : "Minimize";
         card.HeaderMenu = menu;
         card.MouseDown += (_, e) => BeginCardGesture(module, e);
         card.MouseUp += (_, _) =>
         {
-            if (dragCard != module) return;
+            if (gestureModule != module) return;
             MoveCardGesture(module);
             FrameClock.Unsubscribe(GestureFrame);
             EndCardGesture(module);
@@ -231,8 +249,9 @@ public sealed partial class MainForm
     }
 
     // ---------------------------------------------------------------- layout persistence
-    // Format: "id:span:height,…" with a leading "-" for hidden modules.
-    private sealed record DashLayout(string Id, bool Visible, int Span, int Height);
+    // Format: "id:span:height:col:order,…" in reading order. A leading "-" hides a module, "~" minimizes it.
+    // col/order are optional (older layouts): such modules are packed into the first free spot.
+    private sealed record DashLayout(string Id, bool Visible, int Span, int Height, int? Col = null, int? Order = null, bool Minimized = false);
 
     private List<DashLayout> DashLayouts()
     {
@@ -240,13 +259,16 @@ public sealed partial class MainForm
         var source = string.IsNullOrWhiteSpace(settings.UiDashboardCards) ? DefaultDashLayout : settings.UiDashboardCards;
         foreach (var raw in source.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            var hidden = raw.StartsWith('-');
-            var parts = raw.TrimStart('-').Split(':');
+            var flags = raw[..(raw.Length - raw.TrimStart('-', '~').Length)];
+            var parts = raw.TrimStart('-', '~').Split(':');
             var module = dashCards.FirstOrDefault(c => c.Id == parts[0]);
             if (module is null || result.Any(r => r.Id == module.Id)) continue;
-            var span = parts.Length > 1 && int.TryParse(parts[1], out var s) ? Math.Clamp(s, 1, 3) : module.DefaultSpan;
-            var height = parts.Length > 2 && int.TryParse(parts[2], out var h) ? Math.Clamp(h, MinCardHeight, MaxCardHeight) : module.DefaultHeight;
-            result.Add(new DashLayout(module.Id, !hidden, span, height));
+            int? Part(int i) => parts.Length > i && int.TryParse(parts[i], out var v) ? v : null;
+            var span = Part(1) is { } s ? Math.Clamp(s, 1, 3) : module.DefaultSpan;
+            var height = Part(2) is { } h ? Math.Clamp(h, MinCardHeight, MaxCardHeight) : module.DefaultHeight;
+            var col = Part(3) is { } c ? Math.Clamp(c, 0, 2) : (int?)null;
+            var order = Part(4);
+            result.Add(new DashLayout(module.Id, !flags.Contains('-'), span, height, col, col is null ? null : order, flags.Contains('~')));
         }
         foreach (var id in DefaultDashOrder.Concat(dashCards.Select(c => c.Id)))
         {
@@ -256,43 +278,83 @@ public sealed partial class MainForm
         return result;
     }
 
-    /// <summary>Order + visibility (used by the Settings editor).</summary>
+    /// <summary>Order + visibility (used by the Settings editor), in reading order.</summary>
     private List<(string Id, bool Visible)> DashOrder() => DashLayouts().Select(l => (l.Id, l.Visible)).ToList();
+
+    private static string FormatLayout(DashLayout l) =>
+        $"{(l.Visible ? "" : "-")}{(l.Minimized ? "~" : "")}{l.Id}:{l.Span}:{l.Height}" + (l.Col is { } c && l.Order is { } o ? $":{c}:{o}" : "");
 
     private void SaveDashLayouts(List<DashLayout> layouts)
     {
         dashGrid.AnimateNextLayout = true;
-        settings.UiDashboardCards = string.Join(",", layouts.Select(l => $"{(l.Visible ? "" : "-")}{l.Id}:{l.Span}:{l.Height}"));
+        settings.UiDashboardCards = string.Join(",", layouts.Select(FormatLayout));
         ApplyDashboardLayout();
+        StoreGridPositions(); // positions as laid out (reading order)
         SaveAppearance();
         RebuildCardEditor();
     }
 
+    /// <summary>The layout as the grid has it now (columns and order of every card), in reading order.</summary>
+    private List<DashLayout> GridLayouts()
+    {
+        var saved = DashLayouts();
+        var list = saved.Select(l =>
+        {
+            var card = dashCards.First(c => c.Id == l.Id).Card;
+            var col = dashGrid.Cols.TryGetValue(card, out var c) ? c : l.Col;
+            var order = dashGrid.Orders.TryGetValue(card, out var o) ? (int)Math.Round(o) : l.Order;
+            return l with
+            {
+                Span = dashGrid.Spans.TryGetValue(card, out var s) ? s : l.Span,
+                Height = dashGrid.Heights.TryGetValue(card, out var h) ? h : l.Height,
+                Col = col, Order = col is null ? null : order, Minimized = card.Minimized
+            };
+        }).ToList();
+        // reading order: top to bottom (by each card's top edge), then left to right
+        return list.OrderBy(l => l.Order is { } o ? o - l.Height / 2.0 : double.MaxValue).ThenBy(l => l.Col ?? 0).ToList();
+    }
+
+    private void StoreGridPositions() => settings.UiDashboardCards = string.Join(",", GridLayouts().Select(FormatLayout));
+
     private void MoveDashCard(string id, int delta)
     {
-        var layouts = DashLayouts();
-        var index = layouts.FindIndex(o => o.Id == id);
-        var target = Math.Clamp(index + delta, 0, layouts.Count - 1);
-        if (index < 0 || target == index) return;
-        var item = layouts[index]; layouts.RemoveAt(index); layouts.Insert(target, item);
+        // swap places with the previous / next visible module in reading order
+        var layouts = GridLayouts();
+        var visible = layouts.Where(l => l.Visible).ToList();
+        var index = visible.FindIndex(o => o.Id == id);
+        var target = index + delta;
+        if (index < 0 || target < 0 || target >= visible.Count) return;
+        var a = visible[index]; var b = visible[target];
+        var ia = layouts.IndexOf(a); var ib = layouts.IndexOf(b);
+        layouts[ia] = a with { Col = b.Col, Order = b.Order };
+        layouts[ib] = b with { Col = a.Col, Order = a.Order };
         SaveDashLayouts(layouts);
     }
 
     private void SetDashCardVisible(string id, bool visible)
     {
-        var layouts = DashLayouts();
+        var layouts = GridLayouts();
         var index = layouts.FindIndex(o => o.Id == id);
         if (index < 0) return;
-        layouts[index] = layouts[index] with { Visible = visible };
+        layouts[index] = layouts[index] with { Visible = visible, Minimized = visible && layouts[index].Minimized };
         SaveDashLayouts(layouts);
     }
 
     private void SetDashCardSize(string id, int? span, int? height)
     {
-        var layouts = DashLayouts();
+        var layouts = GridLayouts();
         var index = layouts.FindIndex(o => o.Id == id);
         if (index < 0) return;
-        layouts[index] = layouts[index] with { Span = span ?? layouts[index].Span, Height = height ?? layouts[index].Height };
+        layouts[index] = layouts[index] with { Span = span ?? layouts[index].Span, Height = height ?? layouts[index].Height, Minimized = false };
+        SaveDashLayouts(layouts);
+    }
+
+    private void ToggleDashCardMinimized(string id)
+    {
+        var layouts = GridLayouts();
+        var index = layouts.FindIndex(o => o.Id == id);
+        if (index < 0) return;
+        layouts[index] = layouts[index] with { Minimized = !layouts[index].Minimized };
         SaveDashLayouts(layouts);
     }
 
@@ -302,11 +364,22 @@ public sealed partial class MainForm
         var layouts = DashLayouts();
         for (var i = 0; i < layouts.Count; i++)
         {
-            var card = dashCards.First(c => c.Id == layouts[i].Id).Card;
-            dashGrid.Controls.SetChildIndex(card, i);
-            card.Visible = layouts[i].Visible;
-            dashGrid.Spans[card] = layouts[i].Span;
-            dashGrid.Heights[card] = layouts[i].Height;
+            var l = layouts[i];
+            var module = dashCards.First(c => c.Id == l.Id);
+            var card = module.Card;
+            dashGrid.Controls.SetChildIndex(card, i); // older layouts without positions are packed in this order
+            card.Visible = l.Visible;
+            card.Minimized = l.Minimized;
+            if (module.MinimizeAction is { } action)
+            {
+                action.Glyph = l.Minimized ? Glyph.Restore : Glyph.Minimize;
+                action.Tip = l.Minimized ? "Restore (double-click the title too)" : "Minimize (double-click the title too)";
+                card.Invalidate();
+            }
+            dashGrid.Spans[card] = l.Span;
+            dashGrid.Heights[card] = l.Height;
+            if (l.Col is { } col && l.Order is { } order) { dashGrid.Cols[card] = col; dashGrid.Orders[card] = order; }
+            else { dashGrid.Cols.Remove(card); dashGrid.Orders.Remove(card); }
         }
         dashGrid.ResumeLayout(false);
         dashGrid.PerformLayout(); // size changes only touch dictionaries, so a layout must be forced
@@ -316,10 +389,18 @@ public sealed partial class MainForm
     // ---------------------------------------------------------------- drag to move / grip to resize
     private void BeginCardGesture(DashCard module, MouseEventArgs e)
     {
-        if (e.Button != MouseButtons.Left || dragCard is not null) return;
+        if (e.Button != MouseButtons.Left || gestureModule is not null) return;
         var card = module.Card;
-        if (card.Resizable && card.GripBounds.Contains(e.Location)) { dragCard = module; resizing = true; dragStartScreen = gestureCursor(); StartResizeGhost(module); }
-        else if (e.Y < card.HeaderHeight && (card.HeaderMenu is null || e.X <= card.Width - 44)) { dragCard = module; dragStartScreen = gestureCursor(); grabOffset = e.Location; dragging = false; }
+        if (card.Resizable && card.GripBounds.Contains(e.Location))
+        {
+            gestureModule = module; resizing = true;
+            dashGrid.BeginResize(card, e.Location);
+        }
+        else if (card.IsDragArea(e.Location))
+        {
+            gestureModule = module; gesturePending = true; dragging = false;
+            grabOffset = e.Location; gestureStartScreen = gestureCursor();
+        }
         else return;
         FrameClock.Subscribe(this, GestureFrame);
     }
@@ -328,7 +409,7 @@ public sealed partial class MainForm
 
     private void GestureTick()
     {
-        var module = dragCard;
+        var module = gestureModule;
         if (module is null) { FrameClock.Unsubscribe(GestureFrame); return; }
         if (!gestureButtonDown()) { FrameClock.Unsubscribe(GestureFrame); EndCardGesture(module); return; }
         MoveCardGesture(module);
@@ -336,102 +417,35 @@ public sealed partial class MainForm
 
     private void MoveCardGesture(DashCard module)
     {
-        if (dragCard != module) return;
+        if (gestureModule != module) return;
         var pos = gestureCursor();
-        if (resizing) { UpdateResizeGhost(module, pos); return; }
-        if (!dragging)
+        if (gesturePending)
         {
-            if (Math.Abs(pos.X - dragStartScreen.X) + Math.Abs(pos.Y - dragStartScreen.Y) < 6) return;
-            dragging = true;
-            ghost = DragGhost.Snapshot(module.Card);
-            ghost.Show();
-            marker = DragGhost.Bar();
+            if (Math.Abs(pos.X - gestureStartScreen.X) + Math.Abs(pos.Y - gestureStartScreen.Y) < 5) return;
+            gesturePending = false; dragging = true;
             module.Card.Cursor = Cursors.SizeAll;
+            dashGrid.BeginMove(module.Card, grabOffset);
         }
-        ghost!.Location = new Point(pos.X - grabOffset.X, pos.Y - grabOffset.Y);
-        UpdateDropMarker(module, pos);
-    }
-
-    private void UpdateDropMarker(DashCard module, Point screen)
-    {
-        var client = dashGrid.PointToClient(screen);
-        var candidates = dashCards.Where(c => c != module && c.Card.Visible).ToList();
-        if (candidates.Count == 0) { dropTarget = null; marker?.Hide(); return; }
-        var target = candidates.FirstOrDefault(c => c.Card.Bounds.Contains(client))
-                     ?? candidates.OrderBy(c => Distance(c.Card.Bounds, client)).First();
-        var b = target.Card.Bounds;
-        var fullWidth = (dashGrid.Spans.TryGetValue(target.Card, out var s) ? s : 1) >= dashGrid.Columns;
-        var after = fullWidth ? client.Y > b.Top + b.Height / 2 : client.X > b.Left + b.Width / 2;
-        dropTarget = (target, after);
-        var screenBounds = dashGrid.RectangleToScreen(b);
-        marker!.Bounds = fullWidth
-            ? new Rectangle(screenBounds.Left, after ? screenBounds.Bottom + 4 : screenBounds.Top - 9, screenBounds.Width, 5)
-            : new Rectangle(after ? screenBounds.Right + 4 : screenBounds.Left - 9, screenBounds.Top, 5, screenBounds.Height);
-        if (!marker.Visible) marker.Show();
-        ghost?.BringToFront();
-    }
-
-    private static int Distance(Rectangle r, Point p)
-    {
-        var dx = Math.Max(0, Math.Max(r.Left - p.X, p.X - r.Right));
-        var dy = Math.Max(0, Math.Max(r.Top - p.Y, p.Y - r.Bottom));
-        return dx * dx + dy * dy;
-    }
-
-    private void StartResizeGhost(DashCard module)
-    {
-        var layout = DashLayouts().First(l => l.Id == module.Id);
-        resizeTo = (Math.Min(layout.Span, dashGrid.Columns), layout.Height);
-        marker = DragGhost.Outline();
-        marker.Bounds = dashGrid.RectangleToScreen(module.Card.Bounds);
-        marker.Show();
-    }
-
-    private void UpdateResizeGhost(DashCard module, Point screen)
-    {
-        var bounds = module.Card.Bounds;
-        var columns = dashGrid.Columns;
-        var colWidth = (dashGrid.ClientSize.Width - dashGrid.Padding.Horizontal - dashGrid.Gap * (columns - 1)) / (double)columns;
-        var desiredWidth = bounds.Width + (screen.X - dragStartScreen.X);
-        var span = Math.Clamp((int)Math.Round((desiredWidth + dashGrid.Gap) / (colWidth + dashGrid.Gap)), 1, columns);
-        var height = Math.Clamp((bounds.Height + (screen.Y - dragStartScreen.Y)) / HeightSnap * HeightSnap, MinCardHeight, MaxCardHeight);
-        resizeTo = (span, height);
-        var width = (int)Math.Round(span * colWidth + (span - 1) * dashGrid.Gap);
-        var screenTopLeft = dashGrid.PointToScreen(bounds.Location);
-        marker!.Bounds = new Rectangle(screenTopLeft, new Size(width, height));
+        if (dragging || resizing) dashGrid.DragTo(dashGrid.PointToClient(pos));
     }
 
     private void EndCardGesture(DashCard module)
     {
-        if (dragCard != module) return;
-        var wasDragging = dragging; var wasResizing = resizing;
-        dragCard = null; dragging = resizing = false;
-        ghost?.Close(); ghost?.Dispose(); ghost = null;
-        marker?.Close(); marker?.Dispose(); marker = null;
+        if (gestureModule != module) return;
+        var moved = dragging || resizing;
+        gestureModule = null; gesturePending = dragging = resizing = false;
         module.Card.Cursor = Cursors.Default;
-        if (wasResizing)
-        {
-            var layout = DashLayouts().First(l => l.Id == module.Id);
-            // keep a 3-column span saved as 3 even on a narrow window
-            var span = resizeTo.Span >= dashGrid.Columns && layout.Span > dashGrid.Columns ? layout.Span : resizeTo.Span;
-            SetDashCardSize(module.Id, span, resizeTo.Height);
-        }
-        else if (wasDragging && dropTarget is { } drop)
-        {
-            var layouts = DashLayouts();
-            var item = layouts.First(l => l.Id == module.Id);
-            layouts.Remove(item);
-            var index = layouts.FindIndex(l => l.Id == drop.Target.Id) + (drop.After ? 1 : 0);
-            layouts.Insert(Math.Clamp(index, 0, layouts.Count), item);
-            SaveDashLayouts(layouts);
-        }
-        dropTarget = null;
+        if (!moved) return;
+        dashGrid.EndGesture();
+        StoreGridPositions();
+        SaveAppearance();
+        RebuildCardEditor();
     }
 
     // ---------------------------------------------------------------- content refresh
     private void SetResult(string text, Led state)
     {
-        activityGraph.SetResult(DateTime.Now.ToString("HH:mm") + "  ·  " + text, state);
+        downloadMonitor.SetResult(DateTime.Now.ToString("HH:mm") + "  ·  " + text, state);
     }
 
     private void RefreshDashboard()
@@ -448,19 +462,6 @@ public sealed partial class MainForm
         }
         var r = libraryReport;
         libraryStats.SetItems(InsightTabs.Select(t => (t.Label, r is null ? "—" : r.Get(t.Kind).Count.ToString("N0"), t.Glyph)).ToArray());
-    }
-
-    private void RenderMiniFeed()
-    {
-        miniFeedDirty = false;
-        miniFeed.BackColor = Theme.P.Panel;
-        var lines = Math.Clamp(miniFeed.Height / 15 + 2, 6, 60);
-        var recent = console.RecentForFeed(lines);
-        miniFeed.Rtf = recent.Count == 0
-            ? LogRtf.Build([new LogEntry { Text = "Nothing has run yet in this session.", Level = LogLevel.Info, Tag = "APP" }], false, 9f, simple: true)
-            : LogRtf.Build(recent, false, 9f, simple: true); // compact lines (no time/tag columns) suit a module
-        miniFeed.SelectionStart = miniFeed.TextLength;
-        miniFeed.ScrollToCaret();
     }
 }
 
