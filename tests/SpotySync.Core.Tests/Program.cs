@@ -72,7 +72,8 @@ var tests = new (string Name, Action Run)[]
     ("downloads pause and resume their whole process tree", TestDownloadPause),
     ("loaded library catches up with new and deleted files", TestLibraryReconcile),
     ("console split and graph range settings round trip", TestLiveSettings),
-    ("download queue skips songs already in the library", TestQueueSkipsOwnedSongs)
+    ("download queue skips songs already in the library", TestQueueSkipsOwnedSongs),
+    ("download format choice maps to spotDL and yt-dlp", TestDownloadFormat)
 };
 
 var failures = new List<string>();
@@ -963,4 +964,27 @@ static void TestQueueSkipsOwnedSongs()
             "a known playlist was not expanded to its missing songs only: " + string.Join(", ", queue));
     }
     finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+}
+
+static void TestDownloadFormat()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "spotysync-format-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var settings = PortableSettings.Load(directory);
+        Assert(settings.DownloadFormat == "Opus", "Opus is not the default download format");
+        settings.DownloadFormat = "MP3";
+        settings.Save();
+        Assert(PortableSettings.Load(directory).DownloadFormat == "MP3", "download format did not round-trip");
+    }
+    finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+
+    Assert(Downloader.NormalizeFormat(" mp3 ") == "MP3" && Downloader.NormalizeFormat("wav") == "Opus" && Downloader.NormalizeFormat(null) == "Opus",
+        "unknown or untidy format values are not cleaned up");
+    Assert(string.Join(' ', Downloader.SpotDlFormatArguments("Opus")) == "--format opus --bitrate disable", "Opus no longer copies the source audio in spotDL");
+    Assert(string.Join(' ', Downloader.SpotDlFormatArguments("MP3")) == "--format mp3 --bitrate 320k", "MP3 is not 320 kbps in spotDL");
+    Assert(string.Join(' ', Downloader.SpotDlFormatArguments("M4A")) == "--format m4a --bitrate disable", "M4A is not copied in spotDL");
+    Assert(string.Join(' ', Downloader.YtDlpFormatArguments("Opus")).EndsWith("--audio-format best"), "Opus no longer keeps the source audio in yt-dlp");
+    Assert(string.Join(' ', Downloader.YtDlpFormatArguments("MP3")).Contains("--audio-format mp3 --audio-quality 320K"), "MP3 is not 320 kbps in yt-dlp");
+    Assert(string.Join(' ', Downloader.YtDlpFormatArguments("M4A")).Contains("bestaudio[ext=m4a]"), "M4A does not prefer the AAC stream in yt-dlp");
 }
