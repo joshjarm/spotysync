@@ -22,6 +22,7 @@ public sealed partial class MainForm
     private readonly DarkComboBox backend = new() { Width = 220 };
     private readonly DarkComboBox direction = new() { Width = 220 };
     private readonly DarkComboBox downloadSpeed = new() { Width = 330 };
+    private readonly DarkComboBox downloadFormat = new() { Width = 330 };
     private readonly ToggleSwitch enableRemovals = new() { Danger = true };
     private readonly ToggleSwitch likedOnly = new();
     private readonly ToggleSwitch ownedOnly = new();
@@ -150,6 +151,9 @@ public sealed partial class MainForm
         downloadSpeed.Items.AddRange(new object[] { "Safe", "Balanced", "Fast", "Max" });
         downloadSpeed.Format += (_, e) => e.Value = e.ListItem?.ToString() switch { "Safe" => "Safe - 1 song at a time, 4-10 s pauses", "Balanced" => "Balanced - 2 at a time, short pauses", "Fast" => "Fast - 4 at a time, almost no pauses", "Max" => "Max - 6 at a time, no pauses", var s => s };
         g.Add(new SettingRow("Download speed", "How hard SpotySync pushes YouTube. If it starts limiting you, the download slows down by itself and the Console says which speed was too fast.", downloadSpeed, EditorWidth.Wide, "speed fast slow threads pause sleep rate limit"));
+        downloadFormat.Items.AddRange(Downloader.FormatNames);
+        downloadFormat.Format += (_, e) => e.Value = e.ListItem?.ToString() switch { "Opus" => "Opus - original YouTube audio, best quality", "MP3" => "MP3 - 320 kbps, plays on anything", "M4A" => "M4A - AAC audio, good for Apple devices", var s => s };
+        g.Add(new SettingRow("Download format", "File type for new downloads. Opus keeps YouTube's audio exactly as it is (best quality, smallest files). MP3 plays on every device but is re-encoded, so it loses a little quality. Songs you already have are not converted.", downloadFormat, EditorWidth.Wide, "format file type opus mp3 m4a aac quality bitrate codec"));
 
         // ---- Appearance
         g = v.AddGroup("appearance", "Appearance", "Look & feel", Glyph.Palette, "theme color look");
@@ -254,6 +258,7 @@ public sealed partial class MainForm
         backend.SelectedIndexChanged += Dirty;
         direction.SelectedIndexChanged += Dirty;
         downloadSpeed.SelectedIndexChanged += Dirty;
+        downloadFormat.SelectedIndexChanged += Dirty;
     }
 
     private void MarkDirty()
@@ -370,6 +375,7 @@ public sealed partial class MainForm
             removalCap.Value = settings.MaxRemovalsPerPlaylist; cacheDays.Value = settings.LikedCacheFullRefreshDays; lookbackDays.Value = settings.FirstRunLikedLookbackDays;
             downloadAnchorCount.Value = settings.DownloadAnchorFileCount; autoUpdateYtDlp.Checked = settings.AutoUpdateYtDlp; autoYouTubeFallback.Checked = settings.AutoYouTubeFallback; ytDlpUpdateDays.Value = settings.YtDlpUpdateDays;
             downloadSpeed.SelectedItem = new[] { "Safe", "Balanced", "Fast", "Max" }.FirstOrDefault(s => s.Equals(settings.DownloadSpeed, StringComparison.OrdinalIgnoreCase)) ?? "Fast";
+            downloadFormat.SelectedItem = Downloader.NormalizeFormat(settings.DownloadFormat);
             apiRetry.Value = settings.ApiRetryCount; bridgePort.Value = settings.MusicBeeBridgePort; markerOverlap.Value = settings.BackupMarkerOverlapMinutes; createTempPlaylist.Checked = settings.CreateTemporaryDownloadPlaylist;
             includePatterns.Text = settings.PlaylistInclude; excludePatterns.Text = settings.PlaylistExclude;
             LoadAppearanceFields();
@@ -409,6 +415,7 @@ public sealed partial class MainForm
             settings.MaxRemovalsPerPlaylist = (int)removalCap.Value; settings.LikedCacheFullRefreshDays = (int)cacheDays.Value; settings.FirstRunLikedLookbackDays = (int)lookbackDays.Value;
             settings.DownloadAnchorFileCount = (int)downloadAnchorCount.Value; settings.AutoUpdateYtDlp = autoUpdateYtDlp.Checked; settings.AutoYouTubeFallback = autoYouTubeFallback.Checked; settings.YtDlpUpdateDays = (int)ytDlpUpdateDays.Value;
             settings.DownloadSpeed = downloadSpeed.SelectedItem?.ToString() ?? "Fast";
+            settings.DownloadFormat = Downloader.NormalizeFormat(downloadFormat.SelectedItem?.ToString());
             settings.ApiRetryCount = (int)apiRetry.Value; settings.MusicBeeBridgePort = (int)bridgePort.Value; settings.BackupMarkerOverlapMinutes = (int)markerOverlap.Value; settings.CreateTemporaryDownloadPlaylist = createTempPlaylist.Checked;
             settings.PlaylistInclude = includePatterns.Text.Trim(); settings.PlaylistExclude = excludePatterns.Text.Trim();
             if (Path.GetFileName(settings.DownloaderPath).StartsWith("spot2yt", StringComparison.OrdinalIgnoreCase) && clientSecret.Text.Trim().Length == 0)

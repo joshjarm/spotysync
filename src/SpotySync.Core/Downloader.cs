@@ -35,6 +35,34 @@ public sealed class Downloader
         }
     }
 
+    /// <summary>Download file types (setting DownloadFormat). Opus is the default.</summary>
+    public static readonly string[] FormatNames = ["Opus", "MP3", "M4A"];
+
+    /// <summary>The setting value cleaned up: Opus, MP3 or M4A. Anything unknown means Opus.</summary>
+    public static string NormalizeFormat(string? format) =>
+        FormatNames.FirstOrDefault(n => n.Equals(format?.Trim(), StringComparison.OrdinalIgnoreCase)) ?? "Opus";
+
+    /// <summary>spotDL arguments for the chosen file type.</summary>
+    public static string[] SpotDlFormatArguments(string? format) => NormalizeFormat(format) switch
+    {
+        // spotDL's own default re-encodes to 128 kbps MP3, so MP3 asks for 320 kbps.
+        "MP3" => ["--format", "mp3", "--bitrate", "320k"],
+        // spotDL picks YouTube's AAC stream for M4A; with the bitrate option off it is copied unchanged.
+        "M4A" => ["--format", "m4a", "--bitrate", "disable"],
+        // Opus with the bitrate option off copies YouTube Music's best stream unchanged.
+        _ => ["--format", "opus", "--bitrate", "disable"]
+    };
+
+    /// <summary>yt-dlp arguments (stream choice + audio extraction) for the chosen file type.</summary>
+    public static string[] YtDlpFormatArguments(string? format) => NormalizeFormat(format) switch
+    {
+        "MP3" => ["--format", "bestaudio/best", "--extract-audio", "--audio-format", "mp3", "--audio-quality", "320K"],
+        // Prefer the AAC (m4a) stream so it is copied instead of converted.
+        "M4A" => ["--format", "bestaudio[ext=m4a]/bestaudio/best", "--extract-audio", "--audio-format", "m4a"],
+        // Keep the source's best audio stream bit-for-bit (normally YouTube's Opus format 251).
+        _ => ["--format", "bestaudio/best", "--extract-audio", "--audio-format", "best"]
+    };
+
     private static readonly System.Text.RegularExpressions.Regex RateLimited = new(
         @"HTTP Error 429|429 Client Error|Too Many Requests|rate.?limit|Sign in to confirm you.re not a bot|confirm you.re not a bot",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
@@ -217,11 +245,7 @@ public sealed class Downloader
         };
         start.Environment["PATH"] = Path.GetDirectoryName(executable)! + Path.PathSeparator +
             (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
-        // Keep the source's best audio stream bit-for-bit (normally YouTube's Opus
-        // format 251). Converting to MP3 would re-encode already lossy audio.
-        start.ArgumentList.Add("--format"); start.ArgumentList.Add("bestaudio/best");
-        start.ArgumentList.Add("--extract-audio");
-        start.ArgumentList.Add("--audio-format"); start.ArgumentList.Add("best");
+        foreach (var argument in YtDlpFormatArguments(settings.DownloadFormat)) start.ArgumentList.Add(argument);
         start.ArgumentList.Add("--embed-metadata");
         start.ArgumentList.Add("--embed-thumbnail");
         start.ArgumentList.Add("--windows-filenames");
@@ -342,12 +366,7 @@ public sealed class Downloader
             start.ArgumentList.Add(Path.Combine(musicFolder, "{artists} - {title}.{output-ext}"));
             start.ArgumentList.Add("--overwrite");
             start.ArgumentList.Add(overwriteMode);
-            // spotDL's default re-encodes everything to 128 kbps MP3. Opus with the
-            // bitrate option disabled copies YouTube Music's best stream unchanged.
-            start.ArgumentList.Add("--format");
-            start.ArgumentList.Add("opus");
-            start.ArgumentList.Add("--bitrate");
-            start.ArgumentList.Add("disable");
+            foreach (var argument in SpotDlFormatArguments(settings.DownloadFormat)) start.ArgumentList.Add(argument);
             var browser = ConfiguredCookieBrowser(toolDirectory);
             if (browser is not null)
             {
