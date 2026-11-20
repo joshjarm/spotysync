@@ -24,7 +24,7 @@ public sealed partial class MainForm
     private DateTime previewBuiltAt = DateTime.Now;
     private static readonly JsonSerializerOptions SnapshotJson = new() { IncludeFields = true };
 
-    /// <summary>Call after a new preview was built (or applied / the library analysed). Writes in the background.</summary>
+    /// <summary>Call after a new preview was built (or applied / the library analyzed). Writes in the background.</summary>
     private void SavePreviewSnapshot(bool newlyBuilt = false)
     {
         if (newlyBuilt) { previewBuiltAt = DateTime.Now; previewRestoredAt = null; }

@@ -195,7 +195,7 @@ public sealed partial class MainForm
             watcher.EnableRaisingEvents = true;
             libraryWatcher = watcher;
         }
-        catch { /* without a watcher the library still refreshes after each run and on Analyse */ }
+        catch { /* without a watcher the library still refreshes after each run and on Analyze */ }
     }
 
     private void QueueLibraryRefresh()

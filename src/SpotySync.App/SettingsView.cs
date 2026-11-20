@@ -120,7 +120,7 @@ internal sealed class SettingGroup : Card, IHeightForWidth, IHideable
 
     private readonly System.Windows.Forms.Timer flashTimer = new() { Interval = 900 };
 
-    /// <summary>Briefly outlines the group in the accent colour after a rail jump.</summary>
+    /// <summary>Briefly outlines the group in the accent color after a rail jump.</summary>
     public void Flash()
     {
         AccentEdge = Theme.P.Accent;

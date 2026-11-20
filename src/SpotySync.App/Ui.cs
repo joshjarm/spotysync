@@ -72,7 +72,7 @@ internal static class Fonts
         Get($"i{size}", () => new Font(First("Segoe Fluent Icons", "Segoe MDL2 Assets", "Segoe UI Symbol"), size));
 }
 
-/// <summary>Theme roles for plain WinForms controls and the walker that re-colours them.</summary>
+/// <summary>Theme roles for plain WinForms controls and the walker that re-colors them.</summary>
 internal static class Ui
 {
     private sealed class RoleBox { public string Role = ""; }
@@ -116,7 +116,7 @@ internal static class Ui
     private static readonly System.Reflection.PropertyInfo? DoubleBufferedProperty =
         typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
 
-    /// <summary>The nearest solid background colour behind a control.</summary>
+    /// <summary>The nearest solid background color behind a control.</summary>
     public static Color SolidBack(Control? c)
     {
         for (var x = c; x is not null; x = x.Parent)
@@ -124,7 +124,7 @@ internal static class Ui
         return Theme.P.Bg;
     }
 
-    /// <summary>Paints what the parent shows behind <paramref name="c"/> — a solid colour or a parent backdrop (glow).</summary>
+    /// <summary>Paints what the parent shows behind <paramref name="c"/> — a solid color or a parent backdrop (glow).</summary>
     public static void PaintBack(Graphics g, Control c)
     {
         Control? parent = c.Parent;
@@ -134,7 +134,7 @@ internal static class Ui
         else using (var b = new SolidBrush(SolidBack(parent))) g.FillRectangle(b, 0, 0, c.Width, c.Height);
     }
 
-    /// <summary>Re-colour a control tree from the current palette (top-down, so children inherit solid colours).</summary>
+    /// <summary>Re-color a control tree from the current palette (top-down, so children inherit solid colors).</summary>
     public static void Restyle(Control root)
     {
         root.SuspendLayout();
@@ -337,7 +337,7 @@ internal sealed class ThemedMenuRenderer : ToolStripProfessionalRenderer
 /// <summary>Controls that paint their own background (they ask their parent what is behind them).</summary>
 internal interface ISelfBackground { }
 
-/// <summary>Parents that paint something richer than a solid colour behind their children (e.g. the header glow).</summary>
+/// <summary>Parents that paint something richer than a solid color behind their children (e.g. the header glow).</summary>
 internal interface IBackdrop
 {
     /// <summary>Paint the area <paramref name="childBounds"/> (in this control's coordinates) at the graphics origin.</summary>
@@ -1108,7 +1108,7 @@ internal sealed class NavItem : ThemedControl
     public string Glyph { get; set; } = "";
     public bool Mini { get; set; }
     public bool Selected { get => selected; set { selected = value; Invalidate(); } }
-    /// <summary>Badge count; tone Idle = neutral, Warn/Err = coloured.</summary>
+    /// <summary>Badge count; tone Idle = neutral, Warn/Err = colored.</summary>
     public void SetBadge(int count, Led? tone) { badge = count; badgeTone = tone ?? Led.Idle; Invalidate(); }
 
     public NavItem() { Height = 40; Cursor = Cursors.Hand; Margin = new Padding(0, 0, 0, 2); }
@@ -1413,7 +1413,7 @@ internal sealed class NumberBox : FieldBox
     }
 }
 
-/// <summary>Toggleable filter chip with an optional count and tone colour.</summary>
+/// <summary>Toggleable filter chip with an optional count and tone color.</summary>
 internal sealed class Chip : ThemedControl
 {
     private bool selected;
@@ -1446,7 +1446,7 @@ internal sealed class Chip : ThemedControl
     }
 }
 
-/// <summary>Indeterminate activity bar that glides in the accent colour.</summary>
+/// <summary>Indeterminate activity bar that glides in the accent color.</summary>
 internal sealed class SoftProgressBar : ThemedControl
 {
     private int frame;
@@ -1533,7 +1533,7 @@ internal sealed class DarkComboBox : ComboBox
     }
 }
 
-/// <summary>Plain, opaque content host in the window background colour.</summary>
+/// <summary>Plain, opaque content host in the window background color.</summary>
 internal sealed class GlowHost : Panel
 {
     public GlowHost()
@@ -1541,7 +1541,7 @@ internal sealed class GlowHost : Panel
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
         DoubleBuffered = true;
         BackColor = Theme.P.Bg;
-        Theme.Changed += () => BackColor = Theme.P.Bg; // before children re-inherit their colour
+        Theme.Changed += () => BackColor = Theme.P.Bg; // before children re-inherit their color
     }
 
     protected override void OnPaintBackground(PaintEventArgs e)
@@ -1553,7 +1553,7 @@ internal sealed class GlowHost : Panel
 }
 
 /// <summary>
-/// Page title area: eyebrow, title and subtitle drawn directly, over a two-colour glow that is rendered
+/// Page title area: eyebrow, title and subtitle drawn directly, over a two-color glow that is rendered
 /// once into a cached bitmap (re-rendered only on resize or theme change). Child pills paint from it.
 /// </summary>
 internal sealed class PageHeader : Control, IBackdrop

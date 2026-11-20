@@ -99,7 +99,7 @@ public sealed partial class MainForm : Form
     {
         base.OnHandleCreated(e);
         Application.AddMessageFilter(wheelRouter); // scroll whatever is under the mouse, not whatever has focus
-        // Launch flash: Windows shows a new window in a default (white) colour for a frame before it paints.
+        // Launch flash: Windows shows a new window in a default (white) color for a frame before it paints.
         // Keep it cloaked (invisible to the compositor) until the first real frame is painted in OnShown.
         SetCloak(true);
     }

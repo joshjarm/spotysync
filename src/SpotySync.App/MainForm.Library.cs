@@ -51,10 +51,10 @@ public sealed partial class MainForm
             chips.Controls.Add(chip);
         }
         var right = new Row(rightToLeft: true) { Dock = DockStyle.Right, Width = 380 };
-        var analyse = RoundedButton.Make("Analyse library", ButtonKind.Primary, Glyph.Refresh, async (_, _) => await AnalyseLibraryAsync(false));
-        busyButtons.Add(analyse);
-        tips.SetToolTip(analyse, "Reads your library and playlists (reuses the current sync preview when there is one). Read-only — nothing is changed.");
-        right.Controls.Add(analyse);
+        var analyze = RoundedButton.Make("Analyze library", ButtonKind.Primary, Glyph.Refresh, async (_, _) => await AnalyseLibraryAsync(false));
+        busyButtons.Add(analyze);
+        tips.SetToolTip(analyze, "Reads your library and playlists (reuses the current sync preview when there is one). Read-only — nothing is changed.");
+        right.Controls.Add(analyze);
         var upgrade = RoundedButton.Make("Upgrade quality", ButtonKind.Secondary, Glyph.Download, async (_, _) => await UpgradeLowQualityAsync());
         upgrade.Margin = new Padding(0, 0, 8, 0);
         busyButtons.Add(upgrade);
@@ -88,9 +88,9 @@ public sealed partial class MainForm
         // Empty state
         var emptyBody = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2, BackColor = Color.Transparent };
         emptyBody.RowStyles.Add(new RowStyle(SizeType.Percent, 100)); emptyBody.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
-        var emptyText = Ui.Label("Analyse your library to find songs that aren't in any playlist (locally or on Spotify), Liked Songs you haven't downloaded yet, Likes that never made it into a playlist, and duplicate files. It is read-only: nothing is moved, deleted or changed.", "muted", Fonts.Body(10f), autoSize: false);
+        var emptyText = Ui.Label("Analyze your library to find songs that aren't in any playlist (locally or on Spotify), Liked Songs you haven't downloaded yet, Likes that never made it into a playlist, and duplicate files. It is read-only: nothing is moved, deleted or changed.", "muted", Fonts.Body(10f), autoSize: false);
         emptyText.Dock = DockStyle.Fill;
-        var start = RoundedButton.Make("Analyse library", ButtonKind.Primary, Glyph.Library, async (_, _) => await AnalyseLibraryAsync(false));
+        var start = RoundedButton.Make("Analyze library", ButtonKind.Primary, Glyph.Library, async (_, _) => await AnalyseLibraryAsync(false));
         start.Anchor = AnchorStyles.Left; busyButtons.Add(start);
         emptyBody.Controls.Add(emptyText, 0, 0); emptyBody.Controls.Add(start, 0, 1);
         libraryEmpty.Controls.Add(emptyBody);
@@ -221,7 +221,7 @@ public sealed partial class MainForm
         if (prepared is null || rescan)
         {
             if (!SaveSettingsFields(false)) return;
-            await RunBusyAsync("Analysing library and playlists", async token =>
+            await RunBusyAsync("Analyzing library and playlists", async token =>
             {
                 prepared = await service.PrepareAsync(forceRefresh.Checked, forceRefresh.Checked, token);
                 planAppliedAt = null;
@@ -236,7 +236,7 @@ public sealed partial class MainForm
             await RefreshLibraryLiveAsync();
             BuildLibraryReport();
             SavePreviewSnapshot();
-            AppendLog("Library analysed (music folder re-checked; Spotify data from the current sync preview).");
+            AppendLog("Library analyzed (music folder re-checked; Spotify data from the current sync preview).");
         }
         if (!StayOnDashboard) SelectPage(PageLibrary);
     }
