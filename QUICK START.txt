@@ -1,0 +1,58 @@
+SPOTYSYNC 1.4.8 - QUICK START
+===========================
+
+1. Extract this entire folder to a normal writable folder or flash drive.
+2. Run SpotySync.exe once.
+3. Create an app at https://developer.spotify.com/dashboard
+4. Register exactly:  http://127.0.0.1/callback
+5. Copy the Spotify Client ID and Client secret into SpotySync Settings.
+6. Save, then click Connect Spotify and approve the browser login.
+7. Confirm your music path. This PC detects E:\Libraries\Music\Songs; other new
+   installs start with the current Windows user's Music folder.
+8. If using MusicBee: close MusicBee, click Install MusicBee plugin, restart MusicBee.
+9. On Dashboard, click Build sync preview and inspect the plan.
+10. Apply reviewed plan. The first run for each backend/direction is ALWAYS add-only.
+
+MusicBee folders are organizational: Old Playlists\1st Playlist matches Spotify's
+1st Playlist. If two MusicBee folders contain the same leaf name, sync is blocked
+until one is renamed so SpotySync never guesses which playlist you meant.
+
+Keep Enable removals OFF until a clean first sync has completed. Later removals are
+protected by the baseline, snapshot checks, a per-playlist cap, backups, and a final
+confirmation. Local-only and Spotify-only songs are preserved.
+
+If an intentional edition/name mismatch appears, select that playlist and click
+Never sync... Check one or more tracks and save. Review or undo these rules with
+Settings > Review ignored tracks; deleting a line re-enables that track.
+
+Back up recent Liked Songs uses the oldest Date modified timestamp among the five newest local audio files as its
+rolling cutoff, then downloads only missing Likes since that date. yt-dlp checks for
+updates at most once every seven days by default. Your supplied spot2yt program is the
+default downloader; enter the Spotify app's Client ID and Client secret directly in
+Settings once. SpotySync configures the downloader automatically. Dashboard's second download button accepts Spotify playlists
+or tracks, YouTube links, and other URLs supported by yt-dlp. Downloads open Activity
+automatically, are verified in MusicBee, and can be silently initialized for one second.
+If spot2yt cannot find a YouTube Music source, SpotySync searches regular YouTube and
+accepts only a strong title/artist/duration match. It does not record Spotify streams.
+Recent Likes are submitted newest-to-oldest so spot2yt's finalized file timestamps make
+the completed batch appear in Spotify order in a date-sorted MusicBee library.
+Silent initialization now uses MusicBee's Now Playing queue directly, so it does not
+create or open __SpotySync Silent Init / Restore playlist tabs.
+SpotySync does not wait for lyric providers or automatically mark missing lyrics because
+MusicBee does not expose its final visible "No lyrics found" state reliably to plugins.
+Missing lyrics remain unfilled so you can review and tag them manually in MusicBee.
+
+If the configured folder is empty but MusicBee has existing files elsewhere, SpotySync
+auto-detects that real library root before choosing downloads. Cancelling a backup stops
+the downloader and removes its temporary Spotify playlist; interrupted-run leftovers are
+also found and removed automatically at the start of the next backup.
+
+For M3U files instead of MusicBee, choose Local playlist backend = M3U. Choose Both
+to use MusicBee as the local source and also write portable M3U8 copies. Changing the
+backend or sync direction starts a separate, safe add-only baseline.
+
+Your login token is Data\spotify-token.json. Do not give that file to anyone.
+SpotySync stores the downloader secret privately under Tools after setup; never share an already-configured folder.
+The original release ZIP contains no login details or API credentials.
+
+For all options and troubleshooting, read README.md.

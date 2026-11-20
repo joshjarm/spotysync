@@ -1,0 +1,10 @@
+# Optional legacy spot2yt browser-cookie selection. Official spotDL ignores this.
+AUTO=true
+CHROME=false
+EDGE=false
+FIREFOX=false
+BRAVE=false
+OPERA=false
+VIVALDI=false
+CHROMIUM=false
+

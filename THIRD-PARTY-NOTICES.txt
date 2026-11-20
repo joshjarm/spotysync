@@ -1,0 +1,35 @@
+SpotySync portable distribution includes unmodified command-line tools from their
+respective projects. SpotySync launches these as separate processes.
+
+spotDL 4.6.0
+  Project: https://github.com/spotDL/spotify-downloader
+  License: MIT
+  Release: https://github.com/spotDL/spotify-downloader/releases/tag/v4.6.0
+
+bgutil-ytdlp-pot-provider 2.0.2 (yt-dlp plugin, Tools\yt-dlp-plugins)
+  Project: https://github.com/Brainicism/bgutil-ytdlp-pot-provider
+  License: GPL-3.0
+  Release: https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/tag/2.0.2
+
+FFmpeg / ffprobe (2025-03-31 Gyan.dev full build)
+  Project: https://ffmpeg.org/
+  Build source: https://www.gyan.dev/ffmpeg/builds/
+  License information: https://ffmpeg.org/legal.html
+  This full build reports GPL configuration; source and corresponding build links
+  are available from the distributor above.
+
+Deno 2.7.11
+  Project: https://github.com/denoland/deno
+  License: MIT
+
+yt-dlp 2026.07.04
+  Project: https://github.com/yt-dlp/yt-dlp
+  License: The Unlicense
+
+spot2yt.exe
+  Optional compatibility downloader supplied with the original project.
+  It is launched as a separate process and is not required for SpotySync operation.
+  No private credential or browser-options file is included in the clean package.
+
+Spotify and MusicBee are trademarks of their respective owners. SpotySync is an
+independent interoperability utility and is not endorsed by either service.
