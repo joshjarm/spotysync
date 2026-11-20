@@ -75,8 +75,12 @@ else {
     $seedArchive = Get-ChildItem -LiteralPath $distRoot -Filter "SpotySync-*-win-x64.zip" -File -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
     if ($null -eq $seedArchive) {
-        throw "Portable toolchain is unavailable. Keep the latest SpotySync release ZIP in dist, or restore the SpotDL tool binaries."
+        # Fresh clone: download the pinned official tools.
+        & (Join-Path $projectRoot "fetch-tools.ps1") -ToolsDir $toolSeedRoot
+        if (-not $?) { throw "Downloading the portable tools failed." }
+        $toolInputRoot = $toolSeedRoot
     }
+    else {
     New-Item -ItemType Directory -Force -Path $toolSeedRoot | Out-Null
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [System.IO.Compression.ZipFile]::OpenRead($seedArchive.FullName)
@@ -92,6 +96,7 @@ else {
     finally { $archive.Dispose() }
     $toolInputRoot = $toolSeedRoot
     Write-Host "Reused portable tools from: $($seedArchive.FullName)"
+    }
 }
 
 # Build each project (the .slnx solution format needs the .NET 9 SDK; these build with .NET 8).
@@ -111,7 +116,7 @@ $uiSmokeExe = Join-Path $projectRoot "tests\SpotySync.Ui.Smoke\bin\Release\net8.
 if ($LASTEXITCODE -ne 0) { throw "UI smoke test failed." }
 
 dotnet publish (Join-Path $projectRoot "src\SpotySync.App\SpotySync.App.csproj") -c Release -r win-x64 --self-contained true `
-    -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false -o $publishRoot
+    -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false -p:SkipToolFetch=true -p:SkipMusicBeePlugin=true -o $publishRoot
 if ($LASTEXITCODE -ne 0) { throw "Portable application publish failed." }
 
 New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null

@@ -21,3 +21,6 @@ ui-captures/
 # Stray empty files
 /FlickerProbe.cs
 /Watcher.cs
+
+# Tool downloads cached by fetch-tools.ps1
+.tools-cache/
