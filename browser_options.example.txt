@@ -1,4 +1,7 @@
-# Optional legacy spot2yt browser-cookie selection. Official spotDL ignores this.
+# Which browser's signed-in YouTube session (YouTube Premium = ~256 kbps audio) downloads use.
+# Optional: without a browser_options.txt, SpotySync uses your Windows default browser.
+# To pick one, copy this file to browser_options.txt and set exactly one browser to true.
+# Firefox works best; recent Chrome/Edge versions encrypt cookies so other apps can't read them.
 AUTO=true
 CHROME=false
 EDGE=false
@@ -7,4 +10,3 @@ BRAVE=false
 OPERA=false
 VIVALDI=false
 CHROMIUM=false
-

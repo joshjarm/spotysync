@@ -44,11 +44,13 @@ if (Test-Path -LiteralPath $stagingZipPath) { Remove-Item -LiteralPath $stagingZ
 # Large portable tools are already present in the latest clean release ZIP. Reuse
 # those instead of retaining a second 460+ MB uncompressed toolchain in the source
 # tree. A legacy SpotDL folder remains supported for first-time/older workspaces.
-$portableTools = @("spot2yt.exe", "ffmpeg.exe", "ffprobe.exe", "deno.exe", "yt-dlp.exe")
+$portableTools = @("ffmpeg.exe", "ffprobe.exe", "deno.exe", "yt-dlp.exe")
+$appToolsRoot = Join-Path $projectRoot "src\SpotySync.App\bin\Release\net8.0-windows\Tools"
 $legacyToolsRoot = Join-Path $projectRoot "SpotDL"
 $installedToolsRoot = Join-Path $env:ProgramFiles "SpotySync\Tools"
 $legacyToolsComplete = $portableTools | ForEach-Object { Test-Path -LiteralPath (Join-Path $legacyToolsRoot $_) } | Where-Object { -not $_ } | Measure-Object | Select-Object -ExpandProperty Count
 $distToolsComplete = $portableTools | ForEach-Object { Test-Path -LiteralPath (Join-Path $distRoot $_) } | Where-Object { -not $_ } | Measure-Object | Select-Object -ExpandProperty Count
+$appToolsComplete = $portableTools | ForEach-Object { Test-Path -LiteralPath (Join-Path $appToolsRoot $_) } | Where-Object { -not $_ } | Measure-Object | Select-Object -ExpandProperty Count
 $installedToolsComplete = $portableTools | ForEach-Object { Test-Path -LiteralPath (Join-Path $installedToolsRoot $_) } | Where-Object { -not $_ } | Measure-Object | Select-Object -ExpandProperty Count
 if ($legacyToolsComplete -eq 0) {
     $toolInputRoot = $legacyToolsRoot
@@ -57,6 +59,11 @@ elseif ($distToolsComplete -eq 0) {
     # Loose tool binaries kept directly in dist (binaries only are copied; credentials never are).
     $toolInputRoot = $distRoot
     Write-Host "Reused portable tools from: $distRoot"
+}
+elseif ($appToolsComplete -eq 0) {
+    # Binaries from the locally built app folder (its settings, Data and Logs are never copied).
+    $toolInputRoot = $appToolsRoot
+    Write-Host "Reused portable tools from: $appToolsRoot"
 }
 elseif ($installedToolsComplete -eq 0) {
     # Reuse binaries only. Credentials and every other installed/user file are
@@ -87,8 +94,13 @@ else {
     Write-Host "Reused portable tools from: $($seedArchive.FullName)"
 }
 
-dotnet build (Join-Path $projectRoot "SpotySync.slnx") -c Release
-if ($LASTEXITCODE -ne 0) { throw "Solution build failed." }
+# Build each project (the .slnx solution format needs the .NET 9 SDK; these build with .NET 8).
+foreach ($project in @("src\SpotySync.Core\SpotySync.Core.csproj", "src\SpotySync.MusicBeePlugin\SpotySync.MusicBeePlugin.csproj",
+                       "src\SpotySync.App\SpotySync.App.csproj", "tests\SpotySync.Core.Tests\SpotySync.Core.Tests.csproj",
+                       "tests\SpotySync.Ui.Smoke\SpotySync.Ui.Smoke.csproj")) {
+    dotnet build (Join-Path $projectRoot $project) -c Release
+    if ($LASTEXITCODE -ne 0) { throw "Build failed: $project" }
+}
 
 $testExe = Join-Path $projectRoot "tests\SpotySync.Core.Tests\bin\Release\net8.0\SpotySync.Core.Tests.exe"
 & $testExe
@@ -135,14 +147,16 @@ if ((Get-FileHash -LiteralPath $spotDlCache -Algorithm SHA256).Hash -ne $spotDlS
     throw "Downloaded spotDL SHA-256 verification failed."
 }
 Copy-Item -LiteralPath $spotDlCache -Destination (Join-Path $toolsRoot "spotdl.exe")
-Copy-Item -LiteralPath (Join-Path $toolInputRoot "spot2yt.exe") -Destination (Join-Path $toolsRoot "spot2yt.exe")
+$spot2yt = Join-Path $toolInputRoot "spot2yt.exe"
+if (Test-Path -LiteralPath $spot2yt) { Copy-Item -LiteralPath $spot2yt -Destination (Join-Path $toolsRoot "spot2yt.exe") }
 foreach ($tool in @("ffmpeg.exe", "ffprobe.exe", "deno.exe", "yt-dlp.exe")) {
     Copy-Item -LiteralPath (Join-Path $toolInputRoot $tool) -Destination $toolsRoot
 }
 # bgutil PO-token plugin for YouTube Premium (~256 kbps) audio. It lives in Tools\yt-dlp-plugins,
 # which yt-dlp.exe and spotdl.exe both search next to themselves, so the package stays portable and
 # never depends on %APPDATA% (which sandboxed launchers such as MSIX apps silently redirect).
-# Premium also needs the bgutil server checked out at %USERPROFILE%\bgutil-ytdlp-pot-provider\server.
+# The plugin needs the bgutil token server too: its source ships in Tools\bgutil-server and SpotySync
+# installs its npm packages with the bundled Deno on first use (node_modules is links and cannot be zipped).
 $bgutilCache = Join-Path $cacheRoot "bgutil-ytdlp-pot-provider-2.0.2.zip"
 $bgutilUrl = "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/2.0.2/bgutil-ytdlp-pot-provider.zip"
 $bgutilSha256 = "a26b980bf6d8e8400d8f21445daa4d8381bf6183d20f0be309391f86b31e27ef"
@@ -155,10 +169,26 @@ if ((Get-FileHash -LiteralPath $bgutilCache -Algorithm SHA256).Hash -ne $bgutilS
 $pluginRoot = Join-Path $toolsRoot "yt-dlp-plugins"
 New-Item -ItemType Directory -Force -Path $pluginRoot | Out-Null
 Copy-Item -LiteralPath $bgutilCache -Destination (Join-Path $pluginRoot "bgutil-ytdlp-pot-provider.zip")
+$bgutilSourceCache = Join-Path $cacheRoot "bgutil-ytdlp-pot-provider-2.0.2-source.zip"
+$bgutilSourceUrl = "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/archive/refs/tags/2.0.2.zip"
+$bgutilSourceSha256 = "df68ee6210e4960757bceae298927fb2ebd4d5cd9d390f9ff3a8287b0d2d1054"
+if (-not (Test-Path -LiteralPath $bgutilSourceCache) -or (Get-FileHash -LiteralPath $bgutilSourceCache -Algorithm SHA256).Hash -ne $bgutilSourceSha256) {
+    Invoke-WebRequest -Uri $bgutilSourceUrl -OutFile $bgutilSourceCache -UseBasicParsing
+}
+if ((Get-FileHash -LiteralPath $bgutilSourceCache -Algorithm SHA256).Hash -ne $bgutilSourceSha256) {
+    throw "Downloaded bgutil-ytdlp-pot-provider source SHA-256 verification failed."
+}
+$bgutilExtract = Join-Path $cacheRoot "bgutil-source"
+if (Test-Path -LiteralPath $bgutilExtract) { Remove-Item -LiteralPath $bgutilExtract -Recurse -Force }
+Expand-Archive -LiteralPath $bgutilSourceCache -DestinationPath $bgutilExtract
+$bgutilRepo = Join-Path $bgutilExtract "bgutil-ytdlp-pot-provider-2.0.2"
+Copy-Item -LiteralPath (Join-Path $bgutilRepo "server") -Destination (Join-Path $toolsRoot "bgutil-server") -Recurse
+Copy-Item -LiteralPath (Join-Path $bgutilRepo "LICENSE") -Destination (Join-Path $toolsRoot "bgutil-server\LICENSE")
+# No browser_options.txt is shipped: SpotySync then uses the Windows default browser's YouTube sign-in.
 Copy-Item -LiteralPath (Join-Path $projectRoot "browser_options.example.txt") -Destination $toolsRoot
 
 # The package must never inherit the developer/user's real tokens or downloader credentials.
-$forbiddenNames = @("spotify-token.json", "spotify_credentials.txt", "SpotifyAuth.ini")
+$forbiddenNames = @("spotify-token.json", "spotify_credentials.txt", "SpotifyAuth.ini", "SpotySync.ini", "browser_options.txt", "liked-cache.json", "sync-state.json")
 $leaked = Get-ChildItem -LiteralPath $packageRoot -Recurse -File | Where-Object { $forbiddenNames -contains $_.Name }
 if ($leaked) { throw "Credential-bearing file was copied into the clean package: $($leaked.FullName -join ', ')" }
 
@@ -174,14 +204,7 @@ Get-ChildItem -LiteralPath $distRoot -Force | Where-Object { $_.FullName -ne $zi
     Assert-ChildPath $_.FullName $distRoot
     Remove-Item -LiteralPath $_.FullName -Recurse -Force
 }
-foreach ($sourceRoot in @((Join-Path $projectRoot "src"), (Join-Path $projectRoot "tests"))) {
-    Get-ChildItem -LiteralPath $sourceRoot -Directory -Recurse -Force -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -in @("bin", "obj") } |
-        Sort-Object { $_.FullName.Length } -Descending | ForEach-Object {
-            Assert-ChildPath $_.FullName $projectRoot
-            if (Test-Path -LiteralPath $_.FullName) { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
-        }
-}
+# bin\ and obj\ are left alone: the locally built app folder holds the user's settings, login and data.
 if (Test-Path -LiteralPath $cacheRoot) { Remove-Item -LiteralPath $cacheRoot -Recurse -Force }
 
 Write-Host "ZIP:              $zipPath"

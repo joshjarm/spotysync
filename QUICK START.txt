@@ -1,17 +1,17 @@
-SPOTYSYNC 1.4.8 - QUICK START
+SPOTYSYNC 1.5 - QUICK START
 ===========================
 
 1. Extract this entire folder to a normal writable folder or flash drive.
-2. Run SpotySync.exe once.
-3. Create an app at https://developer.spotify.com/dashboard
-4. Register exactly:  http://127.0.0.1/callback
-5. Copy the Spotify Client ID and Client secret into SpotySync Settings.
-6. Save, then click Connect Spotify and approve the browser login.
-7. Confirm your music path. This PC detects E:\Libraries\Music\Songs; other new
-   installs start with the current Windows user's Music folder.
-8. If using MusicBee: close MusicBee, click Install MusicBee plugin, restart MusicBee.
-9. On Dashboard, click Build sync preview and inspect the plan.
-10. Apply reviewed plan. The first run for each backend/direction is ALWAYS add-only.
+2. Run SpotySync.exe. The setup assistant opens: sign in to the Spotify Developer
+   Dashboard and it creates your Spotify app (redirect http://127.0.0.1/callback)
+   and connects. Each user needs their own free Spotify app.
+3. For YouTube Premium (~256 kbps) audio, be signed in to YouTube in your default
+   browser (Firefox works best). The first download sets up the token helper
+   automatically. Without Premium, downloads are ~128 kbps.
+4. Confirm your music folder in Settings (new installs start with your Music folder).
+5. If using MusicBee: close MusicBee, click Install MusicBee plugin, restart MusicBee.
+6. On Dashboard, click Build sync preview and inspect the plan.
+7. Apply reviewed plan. The first run for each backend/direction is ALWAYS add-only.
 
 MusicBee folders are organizational: Old Playlists\1st Playlist matches Spotify's
 1st Playlist. If two MusicBee folders contain the same leaf name, sync is blocked

@@ -4,6 +4,16 @@ SpotySync is a portable Windows companion for keeping Spotify playlists, MusicBe
 
 The portable release keeps its configuration, OAuth token, caches, logs, sync baselines, and M3U backups beside `SpotySync.exe`. The app login uses Spotify Authorization Code with PKCE. The same compact setup screen also accepts the Spotify app secret needed only by the bundled custom downloader and stores it in that tool's private local configuration.
 
+## Download and get started
+
+1. Open the [**Releases**](../../releases/latest) page and download `SpotySync-<version>-win-x64.zip`. It is ready to run and includes every tool it needs: spotDL, yt-dlp, FFmpeg, Deno and the YouTube Premium token helper. You don't need to install .NET or anything else.
+2. Extract the whole zip to a normal folder (not Program Files) and run `SpotySync.exe`.
+3. **Sign in to Spotify:** the setup assistant opens on first launch. Sign in to the Spotify Developer Dashboard, and the assistant creates your Spotify app and connects. Each user needs their own Spotify app, which is free.
+4. **Optional, for YouTube Premium (~256 kbps) audio:** be signed in to YouTube in your default browser. Firefox works best. The first download sets up the Premium token helper automatically (once, about a minute, needs internet).
+5. If you use MusicBee, click **Install MusicBee plugin** in Settings and restart MusicBee.
+
+Without Premium, songs download at YouTube's standard ~128 kbps Opus. To use a browser other than your default, copy `Tools\browser_options.example.txt` to `Tools\browser_options.txt` and set that browser to `true`.
+
 ## What's new in 1.5.0
 
 - **New look.** Side navigation, a status bar and 49 built-in themes:
@@ -169,4 +179,15 @@ Requirements: Windows, .NET SDK 8 or newer, and .NET Framework 4.7.2 targeting s
 .\build-release.ps1
 ```
 
-The script builds the app and plugin, runs the policy/M3U/config tests plus an off-screen UI layout smoke test, verifies the pinned official spotDL executable, bundles the default custom spot2yt downloader without private credentials, and writes a clean portable ZIP under `dist`. To keep the source workspace compact, subsequent builds reuse the portable toolchain from the latest retained release ZIP and automatically remove unpacked releases, older ZIPs, build caches, and `bin`/`obj` outputs after success. Keep the latest release ZIP in `dist`.
+The script:
+- builds the app and plugin
+- runs the policy/M3U/config tests and an off-screen UI layout smoke test
+- downloads and checksum-verifies the pinned spotDL and bgutil token-helper files (plugin and server source)
+- writes a clean portable ZIP under `dist`
+
+It needs ffmpeg.exe, ffprobe.exe, deno.exe and yt-dlp.exe from one of these places:
+- loose in `dist`
+- a previous release ZIP in `dist`
+- the locally built app's `Tools` folder
+
+The large tool binaries are not stored in git because GitHub rejects files over 100 MB. They ship in the release ZIP instead. Your local `bin` folders, which hold your settings and Spotify login, are never touched or packaged.
