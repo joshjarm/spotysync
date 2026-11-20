@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="src/SpotySync.Core/SpotySync.Core.csproj" />
+  <Project Path="src/SpotySync.App/SpotySync.App.csproj" />
+  <Project Path="src/SpotySync.MusicBeePlugin/SpotySync.MusicBeePlugin.csproj" />
+  <Project Path="tests/SpotySync.Core.Tests/SpotySync.Core.Tests.csproj" />
+  <Project Path="tests/SpotySync.Ui.Smoke/SpotySync.Ui.Smoke.csproj" />
+</Solution>

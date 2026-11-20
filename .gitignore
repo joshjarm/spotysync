@@ -1,0 +1,23 @@
+# Build output
+bin/
+obj/
+.vs/
+.build-cache/
+build-cache/
+dist/
+*.user
+
+# Runtime data: settings, Spotify login, logs, caches (contain personal info)
+SpotySync.ini
+Data/
+Logs/
+spotify-token.json
+browser_options.txt
+*.log
+
+# UI smoke-test screenshots (show library contents)
+ui-captures/
+
+# Stray empty files
+/FlickerProbe.cs
+/Watcher.cs

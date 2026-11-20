@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\SpotySync.ico</ApplicationIcon>
+    <AssemblyName>SpotySync</AssemblyName>
+    <Version>1.5.0</Version>
+    <Authors>SpotySync contributors</Authors>
+    <Description>Portable Spotify, MusicBee, M3U and custom spot2yt synchronization.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SpotySync.Core/SpotySync.Core.csproj" />
+  </ItemGroup>
+</Project>
