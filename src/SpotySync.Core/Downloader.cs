@@ -918,7 +918,7 @@ public sealed class Downloader
     {
         var arguments = new List<string>();
         var deno = Path.Combine(toolDirectory, "deno.exe");
-        var serverHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "bgutil-ytdlp-pot-provider", "server");
+        var serverHome = PoTokenServerHome(toolDirectory);
         if (File.Exists(deno)) { arguments.Add("--js-runtimes"); arguments.Add("deno:" + deno.Replace('\\', '/')); }
         if (Directory.Exists(serverHome)) { arguments.Add("--extractor-args"); arguments.Add("youtubepot-bgutilscript:server_home=" + serverHome.Replace('\\', '/')); }
         return arguments;
@@ -979,11 +979,12 @@ public sealed class Downloader
     {
         var deno = Path.Combine(toolDirectory, "deno.exe");
         var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var serverHome = Path.Combine(profile, "bgutil-ytdlp-pot-provider", "server");
+        await EnsureBundledPoTokenServerAsync(toolDirectory, cancellationToken);
+        var serverHome = PoTokenServerHome(toolDirectory);
         var script = Path.Combine(serverHome, "src", "generate_once.ts");
-        if (!File.Exists(deno) || !File.Exists(script))
+        if (!File.Exists(deno) || !File.Exists(script) || !Directory.Exists(Path.Combine(serverHome, "node_modules")))
         {
-            log($"WARNING: the Premium token helper is not installed ({(File.Exists(deno) ? script : deno)} is missing), so downloads will be ~128 kbps.");
+            log($"WARNING: the Premium token helper is not installed ({(File.Exists(deno) ? serverHome : deno)} is missing or not set up), so downloads will be ~128 kbps.");
             return;
         }
         var portablePlugin = Path.Combine(toolDirectory, "yt-dlp-plugins", "bgutil-ytdlp-pot-provider.zip");
@@ -1128,14 +1129,81 @@ public sealed class Downloader
     private static string? ConfiguredCookieBrowser(string toolDirectory)
     {
         var path = Path.Combine(toolDirectory, "browser_options.txt");
-        if (!File.Exists(path)) return null;
         var supported = new[] { "FIREFOX", "CHROME", "EDGE", "BRAVE", "OPERA", "VIVALDI", "CHROMIUM" };
-        var values = File.ReadAllLines(path)
+        var values = !File.Exists(path) ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) : File.ReadAllLines(path)
             .Where(line => !string.IsNullOrWhiteSpace(line) && !line.TrimStart().StartsWith('#'))
             .Select(line => line.Split('=', 2))
             .Where(parts => parts.Length == 2)
-            .ToDictionary(parts => parts[0].Trim(), parts => parts[1].Trim(), StringComparer.OrdinalIgnoreCase);
-        return supported.FirstOrDefault(browser => bool.TryParse(values.GetValueOrDefault(browser), out var enabled) && enabled)?.ToLowerInvariant();
+            .GroupBy(parts => parts[0].Trim(), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Last()[1].Trim(), StringComparer.OrdinalIgnoreCase);
+        var chosen = supported.FirstOrDefault(browser => bool.TryParse(values.GetValueOrDefault(browser), out var enabled) && enabled);
+        if (chosen is not null) return chosen.ToLowerInvariant();
+        // No browser picked (fresh install, or AUTO=true): use the Windows default browser.
+        var auto = !File.Exists(path) || (bool.TryParse(values.GetValueOrDefault("AUTO"), out var autoOn) && autoOn);
+        return auto ? DefaultBrowser() : null;
+    }
+
+    /// <summary>The user's default web browser, as a yt-dlp --cookies-from-browser name.</summary>
+    private static string? DefaultBrowser()
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice");
+            var progId = (key?.GetValue("ProgId") as string ?? "").ToLowerInvariant();
+            if (progId.Contains("firefox")) return "firefox";
+            if (progId.Contains("msedge")) return "edge";
+            if (progId.Contains("brave")) return "brave";
+            if (progId.Contains("opera")) return "opera";
+            if (progId.Contains("vivaldi")) return "vivaldi";
+            if (progId.Contains("chromium")) return "chromium";
+            if (progId.Contains("chrome")) return "chrome";
+        }
+        catch (Exception) { }
+        return null;
+    }
+
+    /// <summary>
+    /// Where the bgutil PO-token helper lives: the copy bundled in Tools\bgutil-server once it is set up,
+    /// otherwise a manual install at %USERPROFILE%\bgutil-ytdlp-pot-provider\server.
+    /// </summary>
+    private static string PoTokenServerHome(string toolDirectory)
+    {
+        var bundled = Path.Combine(toolDirectory, "bgutil-server");
+        if (File.Exists(Path.Combine(bundled, "node_modules", BundledServerReadyMarker))) return bundled;
+        var manual = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "bgutil-ytdlp-pot-provider", "server");
+        return Directory.Exists(Path.Combine(manual, "node_modules")) || !Directory.Exists(bundled) ? manual : bundled;
+    }
+
+    private const string BundledServerReadyMarker = ".spotysync-ready";
+    private static readonly SemaphoreSlim bundledServerSetupGate = new(1, 1);
+
+    /// <summary>
+    /// The release ships the token helper's source only; its npm packages are installed once, on first
+    /// use, with the bundled Deno (about a minute, needs internet). No setup is needed from the user.
+    /// </summary>
+    private async Task EnsureBundledPoTokenServerAsync(string toolDirectory, CancellationToken cancellationToken)
+    {
+        var bundled = Path.Combine(toolDirectory, "bgutil-server");
+        var deno = Path.Combine(toolDirectory, "deno.exe");
+        var marker = Path.Combine(bundled, "node_modules", BundledServerReadyMarker);
+        if (!File.Exists(deno) || !File.Exists(Path.Combine(bundled, "src", "generate_once.ts")) || File.Exists(marker)) return;
+        await bundledServerSetupGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (File.Exists(marker)) return;
+            log("Setting up the Premium audio token helper (one time only, about a minute)…");
+            var ok = await RunHelperAsync(deno, bundled, new[] { "install", "--allow-scripts=npm:canvas", "--frozen" }, TimeSpan.FromMinutes(10), cancellationToken);
+            if (ok && Directory.Exists(Path.Combine(bundled, "node_modules")))
+            {
+                await File.WriteAllTextAsync(marker, DateTime.UtcNow.ToString("o"), cancellationToken);
+                log("Premium audio token helper is set up.");
+            }
+            else log("WARNING: could not set up the Premium audio token helper (check your internet connection). " +
+                     "Downloads will be ~128 kbps; SpotySync will try again next time.");
+        }
+        finally { bundledServerSetupGate.Release(); }
     }
 
     private static DownloadRunResult Merge(IReadOnlyList<DownloadRunResult> results)
