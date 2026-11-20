@@ -11,7 +11,7 @@ public sealed partial class MainForm
     private bool loadingFields;
 
     private readonly FieldBox clientId = Field("Paste the Client ID from your Spotify developer app");
-    private readonly FieldBox clientSecret = new() { Password = true, Placeholder = "Needed by the bundled spot2yt downloader" };
+    private readonly FieldBox clientSecret = new() { Password = true, Placeholder = "Optional: only for the spot2yt downloader" };
     private readonly FieldBox redirectUri = Field("http://127.0.0.1/callback");
     private readonly FieldBox musicFolder = Field();
     private readonly FieldBox m3uFolder = Field();
@@ -72,7 +72,7 @@ public sealed partial class MainForm
             new FieldStrip(clientId, LinkButton("Dashboard", "https://developer.spotify.com/dashboard")), EditorWidth.Wide, "spotify app developer id key"));
         var reveal = RoundedButton.Make("Show", ButtonKind.Secondary, Glyph.Eye);
         reveal.Click += (_, _) => { clientSecret.Password = !clientSecret.Password; reveal.Text = clientSecret.Password ? "Show" : "Hide"; };
-        g.Add(new SettingRow("Client secret", "Stored privately in Tools\\spotify_credentials.txt for the bundled spot2yt downloader. Never shared.",
+        g.Add(new SettingRow("Client secret", "Stored privately in Tools\\spotify_credentials.txt for the optional spot2yt downloader (not included). The bundled spotDL doesn't need it.",
             new FieldStrip(clientSecret, reveal), EditorWidth.Wide, "password secret downloader spot2yt credentials"));
         g.Add(new SettingRow("Redirect URI", "Must match your Spotify app exactly and use the 127.0.0.1 loopback address.",
             redirectUri, EditorWidth.Wide, "callback loopback url oauth"));
@@ -96,7 +96,7 @@ public sealed partial class MainForm
             new FieldStrip(m3uFolder, BrowseFolderButton(m3uFolder)), EditorWidth.Wide, "playlists m3u8 path"));
         g.Add(new SettingRow("Soundtrack folder", "Parent folder for Soundtrack Saver. Each saved soundtrack/playlist gets its own subfolder here (e.g. Music\\Blockheads).",
             new FieldStrip(soundtrackRoot, BrowseFolderButton(soundtrackRoot)), EditorWidth.Wide, "soundtrack saver album game ost folder"));
-        g.Add(new SettingRow("Downloader", "The bundled spot2yt.exe by default. Any compatible downloader executable works.",
+        g.Add(new SettingRow("Downloader", "The bundled spotDL (Tools\\spotdl.exe) by default. spot2yt.exe also works if you have it.",
             new FieldStrip(downloaderPath, BrowseFileButton(downloaderPath, "Executables|*.exe|All files|*.*")), EditorWidth.Wide, "spot2yt spotdl exe tool"));
         g.Add(new SettingRow("ffprobe", "Used to read durations and tags of audio files.",
             new FieldStrip(ffprobePath, BrowseFileButton(ffprobePath, "ffprobe|ffprobe.exe|Executables|*.exe")), EditorWidth.Wide, "ffmpeg probe metadata tags"));
@@ -406,7 +406,7 @@ public sealed partial class MainForm
             settings.ApiRetryCount = (int)apiRetry.Value; settings.MusicBeeBridgePort = (int)bridgePort.Value; settings.BackupMarkerOverlapMinutes = (int)markerOverlap.Value; settings.CreateTemporaryDownloadPlaylist = createTempPlaylist.Checked;
             settings.PlaylistInclude = includePatterns.Text.Trim(); settings.PlaylistExclude = excludePatterns.Text.Trim();
             if (Path.GetFileName(settings.DownloaderPath).StartsWith("spot2yt", StringComparison.OrdinalIgnoreCase) && clientSecret.Text.Trim().Length == 0)
-                throw new InvalidOperationException("Enter the Spotify app Client secret. It is needed by the bundled downloader and is stored privately.");
+                throw new InvalidOperationException("Enter the Spotify app Client secret. The spot2yt downloader needs it; it is stored privately.");
             if (!string.IsNullOrWhiteSpace(settings.SpotifyClientId)) settings.Validate();
             else if (!Uri.TryCreate(settings.RedirectUri, UriKind.Absolute, out var redirect) || redirect.Scheme != "http" || redirect.Host != "127.0.0.1")
                 throw new InvalidOperationException("Redirect URI must use the 127.0.0.1 loopback address, for example http://127.0.0.1/callback.");

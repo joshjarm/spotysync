@@ -27,14 +27,13 @@ Settings > Review ignored tracks; deleting a line re-enables that track.
 
 Back up recent Liked Songs uses the oldest Date modified timestamp among the five newest local audio files as its
 rolling cutoff, then downloads only missing Likes since that date. yt-dlp checks for
-updates at most once every seven days by default. Your supplied spot2yt program is the
-default downloader; enter the Spotify app's Client ID and Client secret directly in
-Settings once. SpotySync configures the downloader automatically. Dashboard's second download button accepts Spotify playlists
+updates at most once every seven days by default. The bundled spotDL is the default
+downloader and needs no setup. Dashboard's second download button accepts Spotify playlists
 or tracks, YouTube links, and other URLs supported by yt-dlp. Downloads open Activity
 automatically, are verified in MusicBee, and can be silently initialized for one second.
-If spot2yt cannot find a YouTube Music source, SpotySync searches regular YouTube and
+If the downloader cannot find a YouTube Music source, SpotySync searches regular YouTube and
 accepts only a strong title/artist/duration match. It does not record Spotify streams.
-Recent Likes are submitted newest-to-oldest so spot2yt's finalized file timestamps make
+Recent Likes are submitted newest-to-oldest so the downloaded files' timestamps make
 the completed batch appear in Spotify order in a date-sorted MusicBee library.
 Silent initialization now uses MusicBee's Now Playing queue directly, so it does not
 create or open __SpotySync Silent Init / Restore playlist tabs.
