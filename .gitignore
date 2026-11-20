@@ -25,3 +25,6 @@ ui-captures/
 
 # Tool downloads cached by fetch-tools.ps1
 .tools-cache/
+
+# Old release output folder (builds go to dist/)
+releases/
