@@ -52,17 +52,29 @@ public sealed partial class MainForm
         if (cancellation is not null) statusText.State = paused ? Led.Warn : Led.Busy;
     }
 
+    /// <summary>The speed dial saves straight away when the person moves it (not when SpotySync slows down by itself).</summary>
+    private void OnDownloadSpeedChanged(bool byUser)
+    {
+        if (!byUser || IsDisposed) return;
+        if (InvokeRequired) { BeginInvoke(() => OnDownloadSpeedChanged(true)); return; }
+        DownloadSpeed.Store(settings);
+        try { settings.Save(); } catch (Exception ex) { AppendLog("WARNING: could not save the download speed: " + ex.Message); }
+    }
+
     private void InitLive()
     {
         pauseButton.Enabled = false;
         pauseButton.Click += (_, _) => TogglePause();
         tips.SetToolTip(pauseButton, "Pause the download without cancelling it (Space in full screen)");
         DownloadProcesses.StateChanged += UpdatePauseButton;
+        DownloadSpeed.Load(settings);
+        DownloadSpeed.Changed += OnDownloadSpeedChanged;
         libraryDebounce.Tick += async (_, _) => { libraryDebounce.Stop(); await RefreshLibraryLiveAsync(); };
         downloadMonitor.Lookup = LookupTrack;
         FormClosed += (_, _) =>
         {
             DownloadProcesses.StateChanged -= UpdatePauseButton;
+            DownloadSpeed.Changed -= OnDownloadSpeedChanged;
             DownloadProcesses.Reset();
             libraryWatcher?.Dispose();
             libraryDebounce.Dispose();
@@ -221,13 +233,18 @@ public sealed partial class MainForm
             var planBefore = snapshot.Plan;
             var rebuild = planAppliedAt is null;
             var library = snapshot.Library.ToList();
+            // the Library page's analysis is built on the worker too: it takes ~0.2 s with a few thousand songs,
+            // and this runs every few seconds while a download is adding files
+            var wantReport = libraryReport is not null;
+            var ignored = wantReport && libraryIgnoreSoundtracks.Checked ? SoundtrackFolders().ToList() : null;
             var update = await Task.Run(async () =>
             {
                 var (added, removed) = await service.CompareLibraryWithDiskAsync(library);
                 if (added.Count == 0 && removed.Count == 0) return null;
                 var copy = new PreparedSync { Plan = planBefore, Library = library, SpotifyPlaylists = snapshot.SpotifyPlaylists, LocalPlaylists = snapshot.LocalPlaylists, Liked = snapshot.Liked };
                 service.ApplyLibraryChanges(copy, added, removed, rebuild);
-                return new { copy.Library, copy.Plan, Added = added.Count, Removed = removed.Count };
+                var report = wantReport ? LibraryInsights.Build(copy, ignored) : null;
+                return new { copy.Library, copy.Plan, Report = report, Added = added.Count, Removed = removed.Count };
             });
             if (update is null || !ReferenceEquals(snapshot, prepared)) return 0;
             prepared.Library = update.Library;
@@ -237,7 +254,8 @@ public sealed partial class MainForm
                 var selected = planGrid.CurrentRow?.Tag as PlaylistPlan;
                 PopulatePlan(prepared.Plan, selected?.Name);
             }
-            if (libraryReport is not null) BuildLibraryReport(quiet: true);
+            if (libraryReport is not null && update.Report is not null) { libraryReport = update.Report; UpdateLibraryState(); FillLibraryGrid(preserveView: true); }
+            else if (libraryReport is not null) BuildLibraryReport(quiet: true);
             SavePreviewSnapshot();
             RefreshDashboard();
             AppendLog($"Library updated: {update.Added} new song(s)" + (update.Removed > 0 ? $", {update.Removed} removed" : "") +

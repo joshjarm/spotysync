@@ -120,6 +120,7 @@ public static class DownloadProcesses
         foreach (var pid in TreeOf(rootPid))
         {
             lock (Gate) if (!Suspended.Add(pid)) continue;
+            if (!OperatingSystem.IsWindows()) { try { _ = kill(pid, SIGSTOP); } catch { } continue; }
             var handle = OpenProcess(ProcessSuspendResume, false, pid);
             if (handle == IntPtr.Zero) continue;
             try { NtSuspendProcess(handle); } finally { CloseHandle(handle); }
@@ -128,6 +129,7 @@ public static class DownloadProcesses
 
     private static void ResumeOne(int pid)
     {
+        if (!OperatingSystem.IsWindows()) { try { _ = kill(pid, SIGCONT); } catch { } return; }
         var handle = OpenProcess(ProcessSuspendResume, false, pid);
         if (handle == IntPtr.Zero) return;
         try { NtResumeProcess(handle); } finally { CloseHandle(handle); }
@@ -137,6 +139,7 @@ public static class DownloadProcesses
     private static List<int> TreeOf(int rootPid)
     {
         var children = new Dictionary<int, List<int>>();
+        if (!OperatingSystem.IsWindows()) return Collect(rootPid, LinuxChildren());
         var snapshot = CreateToolhelp32Snapshot(0x2 /* TH32CS_SNAPPROCESS */, 0);
         if (snapshot == IntPtr.Zero || snapshot == new IntPtr(-1)) return new List<int> { rootPid };
         try
@@ -154,6 +157,34 @@ public static class DownloadProcesses
             }
         }
         finally { CloseHandle(snapshot); }
+        return Collect(rootPid, children);
+    }
+
+    /// <summary>Parent → children from /proc/&lt;pid&gt;/stat (field 4 is the parent id).</summary>
+    private static Dictionary<int, List<int>> LinuxChildren()
+    {
+        var children = new Dictionary<int, List<int>>();
+        try
+        {
+            foreach (var dir in Directory.EnumerateDirectories("/proc"))
+            {
+                if (!int.TryParse(Path.GetFileName(dir), out var pid)) continue;
+                string stat;
+                try { stat = File.ReadAllText(Path.Combine(dir, "stat")); } catch { continue; }
+                var close = stat.LastIndexOf(')'); // the command name may contain spaces and brackets
+                if (close < 0) continue;
+                var fields = stat[(close + 2)..].Split(' ');
+                if (fields.Length < 2 || !int.TryParse(fields[1], out var parent) || parent == pid) continue;
+                if (!children.TryGetValue(parent, out var list)) children[parent] = list = new List<int>();
+                list.Add(pid);
+            }
+        }
+        catch { }
+        return children;
+    }
+
+    private static List<int> Collect(int rootPid, Dictionary<int, List<int>> children)
+    {
         var result = new List<int>();
         var queue = new Queue<int>();
         queue.Enqueue(rootPid);
@@ -168,6 +199,8 @@ public static class DownloadProcesses
     }
 
     private const uint ProcessSuspendResume = 0x0800;
+    private const int SIGCONT = 18, SIGSTOP = 19; // Linux x86-64 / arm64
+    [DllImport("libc", SetLastError = true)] private static extern int kill(int pid, int sig);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct PROCESSENTRY32

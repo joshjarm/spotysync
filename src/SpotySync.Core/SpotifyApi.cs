@@ -343,13 +343,30 @@ public sealed class SpotifyApi : IDisposable
         var artists = new List<string>();
         if (item.TryGetProperty("artists", out var artistItems))
             artists.AddRange(artistItems.EnumerateArray().Select(x => String(x, "name")).Where(x => x.Length > 0));
-        var album = item.TryGetProperty("album", out var albumElement) ? String(albumElement, "name") : "";
+        var hasAlbum = item.TryGetProperty("album", out var albumElement) && albumElement.ValueKind == JsonValueKind.Object;
+        var album = hasAlbum ? String(albumElement, "name") : "";
+        var cover = "";
+        var albumArtist = "";
+        if (hasAlbum)
+        {
+            // the largest picture (Spotify lists them biggest first)
+            if (albumElement.TryGetProperty("images", out var images) && images.ValueKind == JsonValueKind.Array)
+                cover = images.EnumerateArray().OrderByDescending(image => Int(image, "width")).Select(image => String(image, "url")).FirstOrDefault(url => url.Length > 0) ?? "";
+            if (albumElement.TryGetProperty("artists", out var albumArtists) && albumArtists.ValueKind == JsonValueKind.Array)
+                albumArtist = albumArtists.EnumerateArray().Select(x => String(x, "name")).FirstOrDefault(x => x.Length > 0) ?? "";
+        }
         return new TrackInfo
         {
             SpotifyId = id, Uri = String(item, "uri") is { Length: > 0 } uri ? uri : (id.Length > 0 ? "spotify:track:" + id : ""),
             Url = item.TryGetProperty("external_urls", out var urls) ? String(urls, "spotify") : "",
             Title = String(item, "name"), Artists = artists, Album = album,
-            DurationMs = Int(item, "duration_ms"), IsLocal = Bool(item, "is_local")
+            DurationMs = Int(item, "duration_ms"), IsLocal = Bool(item, "is_local"),
+            CoverUrl = cover, AlbumArtist = albumArtist,
+            ReleaseDate = hasAlbum ? String(albumElement, "release_date") : "",
+            AlbumTrackCount = hasAlbum ? Int(albumElement, "total_tracks") : 0,
+            TrackNumber = Int(item, "track_number"), DiscNumber = Int(item, "disc_number"),
+            Isrc = item.TryGetProperty("external_ids", out var externalIds) ? String(externalIds, "isrc") : "",
+            Explicit = Bool(item, "explicit")
         };
     }
 

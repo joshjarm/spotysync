@@ -223,7 +223,7 @@ public sealed partial class MainForm
             if (!SaveSettingsFields(false)) return;
             await RunBusyAsync("Analyzing library and playlists", async token =>
             {
-                prepared = await service.PrepareAsync(forceRefresh.Checked, forceRefresh.Checked, token);
+                prepared = await Task.Run(() => service.PrepareAsync(forceRefresh.Checked, forceRefresh.Checked, token));
                 planAppliedAt = null;
                 PopulatePlan(prepared.Plan);
                 BuildLibraryReport();
@@ -349,7 +349,7 @@ public sealed partial class MainForm
         if (!SaveSettingsFields(false)) return;
         await RunBusyAsync("Upgrading low-quality songs", async token =>
         {
-            var result = await service.UpgradeLowQualityAsync(token);
+            var result = await Task.Run(() => service.UpgradeLowQualityAsync(token));
             if (result.Error.Length > 0) AppendLog("WARNING: " + result.Error);
             SetResult(result.Summary, result.Success ? Led.Ok : Led.Warn);
         });
@@ -368,7 +368,7 @@ public sealed partial class MainForm
         if (!SaveSettingsFields(false)) return;
         await RunBusyAsync($"Downloading {rows.Count} missing Liked song(s)", async token =>
         {
-            var result = await service.DownloadLinksAsync(rows.Select(r => r.SpotifyUrl), token);
+            var result = await Task.Run(() => service.DownloadLinksAsync(rows.Select(r => r.SpotifyUrl), token));
             if (!result.Success) AppendLog("WARNING: " + result.Error);
             SetResult($"Missing Likes: {result.NewAudioFiles} new audio file(s); {result.ImportedFiles} verified in MusicBee.", result.Success ? Led.Ok : Led.Warn);
         });

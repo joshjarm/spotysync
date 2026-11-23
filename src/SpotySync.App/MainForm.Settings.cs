@@ -21,7 +21,7 @@ public sealed partial class MainForm
     private readonly FieldBox soundtrackRoot = Field();
     private readonly DarkComboBox backend = new() { Width = 220 };
     private readonly DarkComboBox direction = new() { Width = 220 };
-    private readonly DarkComboBox downloadSpeed = new() { Width = 330 };
+    private readonly SpeedDial downloadSpeed = new() { Width = 460, Height = 32 };
     private readonly DarkComboBox downloadFormat = new() { Width = 330 };
     private readonly ToggleSwitch enableRemovals = new() { Danger = true };
     private readonly ToggleSwitch likedOnly = new();
@@ -148,9 +148,7 @@ public sealed partial class MainForm
         g.Add(new SettingRow("Auto-update yt-dlp", "Keep the bundled yt-dlp current before downloads.", autoUpdateYtDlp, EditorWidth.Narrow, "youtube update ytdlp"));
         g.Add(new SettingRow("yt-dlp update interval (days)", "How often the yt-dlp update check runs.", ytDlpUpdateDays, EditorWidth.Narrow, "youtube update interval"));
         g.Add(new SettingRow("Automatic public-source fallback", "When a track has no YouTube Music source, try YouTube, album chapters and SoundCloud.", autoYouTubeFallback, EditorWidth.Narrow, "youtube soundcloud fallback recovery"));
-        downloadSpeed.Items.AddRange(new object[] { "Safe", "Balanced", "Fast", "Max" });
-        downloadSpeed.Format += (_, e) => e.Value = e.ListItem?.ToString() switch { "Safe" => "Safe - 1 song at a time, 4-10 s pauses", "Balanced" => "Balanced - 2 at a time, short pauses", "Fast" => "Fast - 4 at a time, almost no pauses", "Max" => "Max - 6 at a time, no pauses", var s => s };
-        g.Add(new SettingRow("Download speed", "How hard SpotySync pushes YouTube. If it starts limiting you, the download slows down by itself and the Console says which speed was too fast.", downloadSpeed, EditorWidth.Wide, "speed fast slow threads pause sleep rate limit"));
+        g.Add(new SettingRow("Download speed", "How many songs download at the same time. Start fast and turn it down if YouTube starts limiting you (SpotySync also halves it by itself and says so in the Console). The same dial sits at the bottom of the window and works during a download. Saved as soon as you change it.", downloadSpeed, EditorWidth.Wide, "speed fast slow threads pause sleep rate limit"));
         downloadFormat.Items.AddRange(Downloader.FormatNames);
         downloadFormat.Format += (_, e) => e.Value = e.ListItem?.ToString() switch { "Opus" => "Opus - original YouTube audio, best quality", "MP3" => "MP3 - 320 kbps, plays on anything", "M4A" => "M4A - AAC audio, good for Apple devices", var s => s };
         g.Add(new SettingRow("Download format", "File type for new downloads. Opus keeps YouTube's audio exactly as it is (best quality, smallest files). MP3 plays on every device but is re-encoded, so it loses a little quality. Songs you already have are not converted.", downloadFormat, EditorWidth.Wide, "format file type opus mp3 m4a aac quality bitrate codec"));
@@ -257,7 +255,6 @@ public sealed partial class MainForm
             t.CheckedChanged += Dirty;
         backend.SelectedIndexChanged += Dirty;
         direction.SelectedIndexChanged += Dirty;
-        downloadSpeed.SelectedIndexChanged += Dirty;
         downloadFormat.SelectedIndexChanged += Dirty;
     }
 
@@ -374,7 +371,6 @@ public sealed partial class MainForm
             autoStartMusicBee.Checked = settings.AutoStartMusicBee; importDownloads.Checked = settings.ImportDownloadsIntoMusicBee; primeDownloads.Checked = settings.PrimeDownloadsInMusicBee;
             removalCap.Value = settings.MaxRemovalsPerPlaylist; cacheDays.Value = settings.LikedCacheFullRefreshDays; lookbackDays.Value = settings.FirstRunLikedLookbackDays;
             downloadAnchorCount.Value = settings.DownloadAnchorFileCount; autoUpdateYtDlp.Checked = settings.AutoUpdateYtDlp; autoYouTubeFallback.Checked = settings.AutoYouTubeFallback; ytDlpUpdateDays.Value = settings.YtDlpUpdateDays;
-            downloadSpeed.SelectedItem = new[] { "Safe", "Balanced", "Fast", "Max" }.FirstOrDefault(s => s.Equals(settings.DownloadSpeed, StringComparison.OrdinalIgnoreCase)) ?? "Fast";
             downloadFormat.SelectedItem = Downloader.NormalizeFormat(settings.DownloadFormat);
             apiRetry.Value = settings.ApiRetryCount; bridgePort.Value = settings.MusicBeeBridgePort; markerOverlap.Value = settings.BackupMarkerOverlapMinutes; createTempPlaylist.Checked = settings.CreateTemporaryDownloadPlaylist;
             includePatterns.Text = settings.PlaylistInclude; excludePatterns.Text = settings.PlaylistExclude;
@@ -414,7 +410,6 @@ public sealed partial class MainForm
             settings.AutoStartMusicBee = autoStartMusicBee.Checked; settings.ImportDownloadsIntoMusicBee = importDownloads.Checked; settings.PrimeDownloadsInMusicBee = primeDownloads.Checked;
             settings.MaxRemovalsPerPlaylist = (int)removalCap.Value; settings.LikedCacheFullRefreshDays = (int)cacheDays.Value; settings.FirstRunLikedLookbackDays = (int)lookbackDays.Value;
             settings.DownloadAnchorFileCount = (int)downloadAnchorCount.Value; settings.AutoUpdateYtDlp = autoUpdateYtDlp.Checked; settings.AutoYouTubeFallback = autoYouTubeFallback.Checked; settings.YtDlpUpdateDays = (int)ytDlpUpdateDays.Value;
-            settings.DownloadSpeed = downloadSpeed.SelectedItem?.ToString() ?? "Fast";
             settings.DownloadFormat = Downloader.NormalizeFormat(downloadFormat.SelectedItem?.ToString());
             settings.ApiRetryCount = (int)apiRetry.Value; settings.MusicBeeBridgePort = (int)bridgePort.Value; settings.BackupMarkerOverlapMinutes = (int)markerOverlap.Value; settings.CreateTemporaryDownloadPlaylist = createTempPlaylist.Checked;
             settings.PlaylistInclude = includePatterns.Text.Trim(); settings.PlaylistExclude = excludePatterns.Text.Trim();

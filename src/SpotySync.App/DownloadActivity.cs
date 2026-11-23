@@ -27,8 +27,8 @@ internal sealed class DownloadMonitor : IDisposable
     ];
     private static readonly Regex Batch = new(@"^Batch (\d+) of (\d+)", RegexOptions.Compiled);
     private static readonly Regex SpotDlDownloaded = new("^Downloaded \"(.+?)\":", RegexOptions.Compiled);
-    private static readonly Regex Failure = new(@"(LookupError: No results found|AudioProviderError|ERROR: \[youtube\])", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-    private static readonly Regex Skip = new(@"^Skipping .+\((file already exists|duplicate)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex Failure = new(@"(Not on YouTube Music: (?<name>.+)|LookupError: No results found for song: (?<name>.+)|AudioProviderError|ERROR: \[youtube\])", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex Skip = new(@"^Skipping (.+?) \((file already exists|duplicate)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 250 };
     private readonly List<FileSystemWatcher> watchers = new();
@@ -54,6 +54,9 @@ internal sealed class DownloadMonitor : IDisposable
     public string Label { get; private set; } = "";
     // queue size: links queued, with playlists/albums replaced by the songs spotDL found in them
     private int baseTarget, containersFound, songsFound;
+    private readonly HashSet<string> downloadedNames = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> failedNames = new(StringComparer.OrdinalIgnoreCase); // a song that fails again after a restart counts once
+    private readonly HashSet<string> failedVideos = new(StringComparer.OrdinalIgnoreCase); // YouTube refusals, retried after a rate limit
     private readonly HashSet<string> foundContainers = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Regex FoundSongs = new(@"Found (\d+) songs in (.+)", RegexOptions.Compiled);
     public int? Target => baseTarget == 0 && songsFound == 0 ? null : Math.Max(Processed, baseTarget - containersFound + songsFound);
@@ -110,7 +113,7 @@ internal sealed class DownloadMonitor : IDisposable
     {
         StopWatching();
         Samples.Clear(); Events.Clear(); active.Clear(); partials.Clear(); finals.Clear(); finishedNames.Clear(); window.Clear(); queue.Clear(); tempFolders.Clear();
-        baseTarget = containersFound = songsFound = 0; foundContainers.Clear(); activeSeconds.Clear(); lastActiveSecond = -1; activeTotal = 0;
+        baseTarget = containersFound = songsFound = 0; foundContainers.Clear(); downloadedNames.Clear(); failedNames.Clear(); failedVideos.Clear(); activeSeconds.Clear(); lastActiveSecond = -1; activeTotal = 0;
         Downloaded = 0; Speed = Peak = 0; Looked = Failed = Skipped = 0; BatchText = ""; LastFinished = ""; Phase = "Starting…";
         Ended = null; pausedSince = null; pausedTotal = TimeSpan.Zero; secondBytes = 0; nextSampleAt = 1; lastTick = 0; lastGrowing = ""; tempActivity = false;
         Label = label; Started = DateTime.Now; Running = true;
@@ -177,7 +180,7 @@ internal sealed class DownloadMonitor : IDisposable
             if (m.Success && int.TryParse(m.Groups[1].Value, out var n) && n > 0) { baseTarget = Math.Max(n, baseTarget); break; }
         }
         var found = FoundSongs.Match(t);
-        if (found.Success && int.TryParse(found.Groups[1].Value, out var inside) && foundContainers.Add(found.Groups[2].Value.Trim()))
+        if (found.Success && int.TryParse(found.Groups[1].Value, out var inside) && !found.Groups[2].Value.Contains(".spotdl", StringComparison.OrdinalIgnoreCase) && foundContainers.Add(found.Groups[2].Value.Trim()))
         {
             containersFound++;
             songsFound += inside;
@@ -191,15 +194,36 @@ internal sealed class DownloadMonitor : IDisposable
             if (id.Length > 0) queue.Add(id);
             if (Processed == 0) Phase = "Looking up songs";
         }
-        else if (SpotDlDownloaded.Match(t) is { Success: true } done) LastFinished = done.Groups[1].Value;
-        else if (Failure.IsMatch(t) && !t.StartsWith("WARNING", StringComparison.OrdinalIgnoreCase))
+        else if (SpotDlDownloaded.Match(t) is { Success: true } done) { LastFinished = done.Groups[1].Value; downloadedNames.Add(LastFinished); }
+        else if (Failure.Match(t) is { Success: true } failure && !t.StartsWith("WARNING", StringComparison.OrdinalIgnoreCase))
         {
-            Failed++;
-            Events.Add(new SongEvent(Elapsed.TotalSeconds, CurrentName, true));
+            var name = failure.Groups["name"].Success ? failure.Groups["name"].Value.Trim() : "";
+            // a YouTube error names the video (spotDL repeats it in its closing summary): count each video once
+            var video = Regex.Match(t, @"AudioProviderError: YT-DLP download error - (\S+)");
+            var key = video.Success ? video.Groups[1].Value : name;
+            if (key.Length == 0 || failedNames.Add(key))
+            {
+                Failed++;
+                if (video.Success) failedVideos.Add(key);
+                Events.Add(new SongEvent(Elapsed.TotalSeconds, name.Length > 0 ? name : CurrentName, true));
+            }
         }
-        else if (Skip.IsMatch(t)) Skipped++;
-        if (t.StartsWith("MusicBee final stage", StringComparison.OrdinalIgnoreCase) || t.StartsWith("Importing", StringComparison.OrdinalIgnoreCase)) Phase = "Adding to MusicBee";
+        // after a speed change the batch restarts and spotDL skips the songs it just finished: those are not "already had"
+        else if (Skip.Match(t) is { Success: true } skip && !downloadedNames.Contains(skip.Groups[1].Value.Trim())) Skipped++;
+        // large downloads add each batch to MusicBee in the background ("Adding batch …"): the phase stays on downloading
+        if (t.StartsWith("MusicBee final stage", StringComparison.OrdinalIgnoreCase) || t.StartsWith("Importing", StringComparison.OrdinalIgnoreCase) ||
+            t.StartsWith("All batches downloaded", StringComparison.OrdinalIgnoreCase) || t.StartsWith("Download stopped. Finishing", StringComparison.OrdinalIgnoreCase))
+            Phase = "Adding to MusicBee";
+        else if (Batch.IsMatch(t)) Phase = "Downloading";
         else if (t.Contains("Quality check", StringComparison.OrdinalIgnoreCase)) Phase = "Checking audio quality";
+        else if (t.StartsWith("YouTube rate limit lifted", StringComparison.OrdinalIgnoreCase)) Phase = "Downloading";
+        else if (t.StartsWith("YouTube rate limit:", StringComparison.OrdinalIgnoreCase))
+        {
+            // the songs YouTube refused are retried after the limit, so they don't count as failed
+            if (t.Contains("are retried", StringComparison.Ordinal)) { Failed -= failedVideos.Count; failedNames.ExceptWith(failedVideos); failedVideos.Clear(); }
+            var at = Regex.Match(t, @"checking again at (\d{1,2}:\d{2})");
+            Phase = at.Success ? $"YouTube rate limit - trying again at {at.Groups[1].Value}" : "YouTube rate limit - waiting";
+        }
     }
 
     // ---------------------------------------------------------------- files
@@ -469,7 +493,7 @@ internal sealed class ActivityGraph : ThemedControl
         var tiles = new (string Caption, string Value, string Sub, Color Color)[]
         {
             ("SPEED", m is null || !hasRun ? "—" : m.Paused ? "Paused" : m.Running ? Bytes(m.Speed) + "/s" : Bytes(m.AverageSpeed) + "/s",
-                m is null || !hasRun ? "" : m.Running ? $"overall {Bytes(m.OverallSpeed)}/s incl. gaps · peak {Bytes(m.Peak)}/s" : "average while downloading", p.Accent),
+                m is null || !hasRun ? "" : m.Running ? $"{DownloadSpeed.Current.Short} at once · peak {Bytes(m.Peak)}/s · overall {Bytes(m.OverallSpeed)}/s" : "average while downloading", p.Accent),
             ("DOWNLOADED", m is null || m.Downloaded == 0 ? "—" : Bytes(m.Downloaded),
                 expected is { } total && m!.Running ? $"of ≈ {Bytes(total)}" : m is { Written: > 0 } ? $"{Bytes(m.Written)} saved" : "", p.Ink),
             ("SONGS", m is null || !hasRun ? "—" : target is { } t ? $"{Math.Min(m.Processed, t)} / {t}" : m.Done.ToString(),
@@ -562,15 +586,23 @@ internal sealed class ActivityGraph : ThemedControl
         var size = m.Running && m.ExpectedTotal is { } total ? $"{Bytes(m.Downloaded)} / ≈ {Bytes(Math.Max(total, m.Downloaded))}" : Bytes(m.Downloaded);
         var big = Fonts.Display(12.5f * scale);
         var songsW = TextRenderer.MeasureText(songs, big).Width;
+        var sizeW = TextRenderer.MeasureText(size, big).Width;
+        var gap = (int)(20 * scale);
         Ui.Text(g, songs, big, new Rectangle(left, plot.Top + (int)(6 * scale), Math.Min(width, songsW + 4), (int)(24 * scale)), p.Accent2);
-        if (songsW + 24 < width)
-            Ui.Text(g, size, big, new Rectangle(left + songsW + (int)(20 * scale), plot.Top + (int)(6 * scale), width - songsW - (int)(20 * scale), (int)(24 * scale)), p.Ink);
+        // the size goes next to the song count when both fit beside the range buttons, otherwise on the line below
+        var sizeBeside = songsW + gap + sizeW <= width;
+        if (sizeBeside)
+            Ui.Text(g, size, big, new Rectangle(left + songsW + gap, plot.Top + (int)(6 * scale), sizeW + 4, (int)(24 * scale)), p.Ink);
         var detail = string.Join("  ·  ", new[]
         {
+            sizeBeside ? "" : size,
             m.Done > 0 ? $"{m.Done:N0} downloaded" : "", m.Skipped > 0 ? $"{m.Skipped:N0} already had" : "", m.Failed > 0 ? $"{m.Failed:N0} failed" : "",
             m.Written > 0 ? $"{Bytes(m.Written)} saved" : ""
         }.Where(s => s.Length > 0));
-        if (detail.Length > 0) Ui.Text(g, detail, Fonts.Body(8f * scale), new Rectangle(left, plot.Top + (int)(29 * scale), width, (int)(16 * scale)), p.Muted);
+        var detailWidth = plot.Right - (int)(14 * scale) - left; // below the range buttons, so the whole width is free
+        if (detail.Length > 0)
+            Ui.Text(g, detail, sizeBeside ? Fonts.Body(8f * scale) : Fonts.Semibold(8.5f * scale), new Rectangle(left, plot.Top + (int)(29 * scale), detailWidth, (int)(16 * scale)),
+                sizeBeside ? p.Muted : p.Ink, TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
     }
 
     private void DrawRangeChips(Graphics g, Rectangle plot, float scale)
@@ -725,6 +757,7 @@ internal sealed class ActivityWindow : Form
     private readonly RoundedButton pause = RoundedButton.Make("Pause", ButtonKind.Secondary, Glyph.Pause);
     private readonly RoundedButton cancel = RoundedButton.Make("Cancel", ButtonKind.Secondary, Glyph.Stop);
     private readonly RoundedButton exit = RoundedButton.Make("Exit full screen", ButtonKind.Ghost, Glyph.Collapse);
+    private readonly SpeedDial speed = new() { Width = 360, Height = 34, Margin = new Padding(8, 0, 12, 0) };
     private readonly Func<bool> canPause;
     private readonly System.Windows.Forms.Timer refresh = new() { Interval = 400 };
     private FormWindowState restoreState;
@@ -748,6 +781,7 @@ internal sealed class ActivityWindow : Form
         pause.Click += (_, _) => { togglePause(); UpdateButtons(); };
         cancel.Click += (_, _) => cancelRun();
         foreach (var b in new[] { exit, cancel, pause }) { b.Margin = new Padding(8, 0, 0, 0); top.Controls.Add(b); }
+        top.Controls.Add(speed); // download speed, live (also + and - keys)
         var host = new Panel { Dock = DockStyle.Fill, Padding = new Padding(36, 18, 36, 24) };
         host.Controls.Add(graph); host.Controls.Add(top);
         Controls.Add(host);
@@ -809,6 +843,8 @@ internal sealed class ActivityWindow : Form
         if (keyData == Keys.F11) { ToggleFullScreen(); return true; }
         if (keyData == Keys.Escape) { Close(); return true; }
         if (keyData == Keys.Space) { pause.PerformClick(); return true; }
+        if (keyData is Keys.Add or Keys.Oemplus or (Keys.Oemplus | Keys.Shift)) { DownloadSpeed.Set(DownloadSpeed.Index + 1, byUser: true); return true; }
+        if (keyData is Keys.Subtract or Keys.OemMinus) { DownloadSpeed.Set(DownloadSpeed.Index - 1, byUser: true); return true; }
         return base.ProcessCmdKey(ref msg, keyData);
     }
 }

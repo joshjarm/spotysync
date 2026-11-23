@@ -34,8 +34,9 @@ public sealed class PortableSettings
     public bool AutoUpdateYtDlp { get; set; } = true;
     public int YtDlpUpdateDays { get; set; } = 7;
     public bool AutoYouTubeFallback { get; set; } = true;
-    /// <summary>Download pace: Safe, Balanced, Fast or Max (threads + pauses between songs).</summary>
-    public string DownloadSpeed { get; set; } = "Fast";
+    /// <summary>Songs downloaded at the same time (1-32) and the pause between songs (0-10 s, only used at 1 song at a time).</summary>
+    public int DownloadThreads { get; set; } = SpotySync.DownloadSpeed.DefaultThreads;
+    public int DownloadPauseSeconds { get; set; }
     /// <summary>Audio file type for downloads: Opus (YouTube's original audio, no re-encode), MP3 (320 kbps, plays everywhere) or M4A (AAC).</summary>
     public string DownloadFormat { get; set; } = "Opus";
     public bool ImportDownloadsIntoMusicBee { get; set; } = true;
@@ -78,6 +79,7 @@ public sealed class PortableSettings
         };
         if (!File.Exists(settings.FilePath))
         {
+            settings.ApplyPlatform();
             settings.Save();
             return settings;
         }
@@ -123,7 +125,8 @@ public sealed class PortableSettings
         settings.AutoUpdateYtDlp = GetBool(values, "Backup", "AutoUpdateYtDlp", settings.AutoUpdateYtDlp);
         settings.YtDlpUpdateDays = GetInt(values, "Backup", "YtDlpUpdateDays", settings.YtDlpUpdateDays, 1, 30);
         settings.AutoYouTubeFallback = GetBool(values, "Backup", "AutoYouTubeFallback", settings.AutoYouTubeFallback);
-        settings.DownloadSpeed = Get(values, "Backup", "DownloadSpeed", settings.DownloadSpeed);
+        settings.DownloadThreads = GetInt(values, "Backup", "DownloadThreads", settings.DownloadThreads, 1, 32);
+        settings.DownloadPauseSeconds = GetInt(values, "Backup", "DownloadPauseSeconds", settings.DownloadPauseSeconds, 0, 10);
         settings.DownloadFormat = Get(values, "Backup", "DownloadFormat", settings.DownloadFormat);
 
         settings.UiTheme = Get(values, "Appearance", "Theme", settings.UiTheme);
@@ -139,8 +142,29 @@ public sealed class PortableSettings
         settings.UiConsoleSimple = GetBool(values, "Appearance", "ConsoleSimple", settings.UiConsoleSimple);
         settings.UiConsoleSplit = GetBool(values, "Appearance", "ConsoleSplit", settings.UiConsoleSplit);
         settings.UiActivityRange = int.TryParse(Get(values, "Appearance", "ActivityRange", "0"), out var range) ? Math.Clamp(range, 0, 86400) : 0;
+        settings.ApplyPlatform();
         return settings;
     }
+
+    /// <summary>
+    /// Linux has no MusicBee: playlists are M3U files (Strawberry and other players read them) and nothing is sent
+    /// to MusicBee. A Windows music folder (E:\…) carried over from Windows falls back to ~/Music.
+    /// </summary>
+    private void ApplyPlatform()
+    {
+        if (Platform.HasMusicBee) return;
+        LocalBackend = LocalBackendKind.M3U;
+        ImportDownloadsIntoMusicBee = false;
+        PrimeDownloadsInMusicBee = false;
+        AutoStartMusicBee = false;
+        if (LooksLikeWindowsPath(MusicFolder)) MusicFolder = DefaultMusicFolder();
+        if (LooksLikeWindowsPath(SoundtrackFolder)) SoundtrackFolder = DefaultSoundtrackFolder();
+        if (LooksLikeWindowsPath(M3uFolder) || M3uFolder == "Playlists") M3uFolder = Path.Combine(MusicFolder, "Playlists");
+        DownloaderPath = Platform.LocalPath(DownloaderPath);
+        FfprobePath = Platform.LocalPath(FfprobePath);
+    }
+
+    private static bool LooksLikeWindowsPath(string path) => path.Length >= 2 && path[1] == ':' || path.StartsWith(@"\\");
 
     public void Save()
     {
@@ -191,8 +215,10 @@ CreateTemporaryPlaylist={CreateTemporaryDownloadPlaylist}
 AutoUpdateYtDlp={AutoUpdateYtDlp}
 YtDlpUpdateDays={YtDlpUpdateDays}
 AutoYouTubeFallback={AutoYouTubeFallback}
-# DownloadSpeed: Safe (1 song at a time, 4-10 s pauses), Balanced, Fast or Max. Slows down by itself if YouTube limits you.
-DownloadSpeed={DownloadSpeed}
+# DownloadThreads: songs downloaded at the same time (1-32). Change it live with the speed dial at the bottom of the window.
+# It halves by itself when YouTube starts limiting. DownloadPauseSeconds (0-10) adds pauses at 1 song at a time.
+DownloadThreads={DownloadThreads}
+DownloadPauseSeconds={DownloadPauseSeconds}
 # DownloadFormat: Opus (YouTube's original audio, best quality, smallest files), MP3 (320 kbps, plays on anything) or M4A (AAC, good for Apple devices).
 DownloadFormat={DownloadFormat}
 
@@ -218,6 +244,7 @@ ActivityRange={UiActivityRange}
     public string ResolvePath(string path)
     {
         if (string.IsNullOrWhiteSpace(path)) return BaseDirectory;
+        path = Platform.LocalPath(path);
         return Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(BaseDirectory, path));
     }
 

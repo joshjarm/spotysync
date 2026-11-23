@@ -82,6 +82,16 @@ var foundSetups = ExistingSetup.Find(settings);
 Console.WriteLine("existing setups: " + (foundSetups.Count == 0 ? "none" : string.Join("; ", foundSetups.Select(f => $"{f.Folder} (login={f.HasLogin}, secret={f.ClientSecret.Length > 0})"))));
 CaptureDialog(new SetupAssistant("http://127.0.0.1/callback", "", foundSetups) { AutoStart = false, Size = new Size(840, 760) }, Path.Combine(output, "setup.png"));
 CaptureDialog(new SoundtrackDialog(settings.SoundtrackFolder, ["Blockheads"]) { Size = new Size(780, 600) }, Path.Combine(output, "soundtrack.png"));
+// songs YouTube Music didn't have: the list where a YouTube link can be added
+var hadNotFound = File.Exists(NotFoundSongs.PathFor(settings));
+var notFoundBackup = hadNotFound ? File.ReadAllText(NotFoundSongs.PathFor(settings)) : null;
+NotFoundSongs.MarkMissing(settings, [
+    new TrackInfo { SpotifyId = "SMOKE00000000000000001", Title = "STATIK", Artists = ["Alex Peipman", "Mike Klubnika"], Album = "A C H T U N G !", DurationMs = 146411 },
+    new TrackInfo { SpotifyId = "SMOKE00000000000000002", Title = "Pruritus", Artists = ["Mike Klubnika"], Album = "MOLDRISE (Original Soundtrack)", DurationMs = 178500 },
+    new TrackInfo { SpotifyId = "SMOKE00000000000000003", Title = "A song with a really long title that has to be cut off neatly", Artists = ["Somebody"], DurationMs = 200000 }]);
+NotFoundSongs.SetManualUrl(settings, "SMOKE00000000000000002", "https://music.youtube.com/watch?v=abc");
+CaptureDialog(new NotFoundDialog(settings) { Size = new Size(980, 620) }, Path.Combine(output, "not-found.png"));
+if (notFoundBackup is not null) File.WriteAllText(NotFoundSongs.PathFor(settings), notFoundBackup); else File.Delete(NotFoundSongs.PathFor(settings));
 Console.WriteLine(output);
 form.Close();
 }

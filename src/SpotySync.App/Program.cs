@@ -8,6 +8,9 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        // A new version's first start takes over settings, login and caches from the copy used last (before
+        // RememberCompanionPath overwrites the pointer to that copy).
+        VersionCarryOver.RunIfFresh(AppContext.BaseDirectory, LastCompanionFolder() is { } last ? [last] : null);
         var settings = PortableSettings.Load(AppContext.BaseDirectory);
         RememberCompanionPath();
         if (args.Length > 0)
@@ -69,6 +72,17 @@ internal static class Program
             return 0;
         }
         catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+    }
+
+    /// <summary>The folder of the SpotySync copy that ran last (the MusicBee plugin's pointer), if any.</summary>
+    private static string? LastCompanionFolder()
+    {
+        try
+        {
+            var file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MusicBeeSyncToService", "CompanionPath.txt");
+            return File.Exists(file) ? Path.GetDirectoryName(File.ReadAllText(file).Trim()) : null;
+        }
+        catch { return null; }
     }
 
     private static void RememberCompanionPath()

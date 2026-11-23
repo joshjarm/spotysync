@@ -27,6 +27,15 @@ public sealed class TrackInfo
     public int DurationMs { get; set; }
     public DateTimeOffset? AddedAt { get; set; }
     public bool IsLocal { get; set; }
+    // Extra details, filled in when the track is read from Spotify, so downloads can skip spotDL's own Spotify lookup.
+    public string CoverUrl { get; set; } = "";
+    public string ReleaseDate { get; set; } = "";
+    public string AlbumArtist { get; set; } = "";
+    public int TrackNumber { get; set; }
+    public int DiscNumber { get; set; }
+    public int AlbumTrackCount { get; set; }
+    public string Isrc { get; set; } = "";
+    public bool Explicit { get; set; }
     public string DisplayName => $"{string.Join("; ", Artists)} - {Title}".Trim(' ', '-');
 }
 
@@ -205,8 +214,14 @@ public sealed class ManualDownloadResult
     public int NewAudioFiles { get; set; }
     public int ImportedFiles { get; set; }
     public int PrimedFiles { get; set; }
+    /// <summary>Songs YouTube Music didn't have (they are in the Not on YouTube Music list).</summary>
+    public int NotFound { get; set; }
     public int ExitCode { get; set; }
     public List<string> Files { get; set; } = new();
+    /// <summary>Downloaded files still to be added to MusicBee (large downloads add them in the background).</summary>
+    public List<string> ImportLater { get; set; } = new();
+    /// <summary>Downloaded songs not added because MusicBee stayed closed (the next sync adds them).</summary>
+    public int WaitingForMusicBee { get; set; }
     public string ResolvedMusicFolder { get; set; } = "";
     public string Error { get; set; } = "";
 }

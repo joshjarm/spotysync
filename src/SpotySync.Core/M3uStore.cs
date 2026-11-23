@@ -54,20 +54,21 @@ public sealed class M3uStore
         if (dryRun || added + removed == 0) return (added, removed);
 
         Backup(target);
-        var builder = new StringBuilder("#EXTM3U\r\n");
+        var newline = Platform.IsWindows ? "\r\n" : "\n";
+        var builder = new StringBuilder("#EXTM3U").Append(newline);
         foreach (var file in desired)
         {
             if (metadata.TryGetValue(SyncPlanner.PathKey(file), out var track))
             {
                 var seconds = track.DurationMs > 0 ? track.DurationMs / 1000 : -1;
-                builder.Append("#EXTINF:").Append(seconds).Append(',').Append(track.DisplayName.Replace("\r", " ").Replace("\n", " ")).Append("\r\n");
+                builder.Append("#EXTINF:").Append(seconds).Append(',').Append(track.DisplayName.Replace("\r", " ").Replace("\n", " ")).Append(newline);
             }
             var output = file;
             if (settings.RelativeM3uPaths)
             {
                 try { output = Path.GetRelativePath(Path.GetDirectoryName(target) ?? folder, file); } catch { }
             }
-            builder.Append(output).Append("\r\n");
+            builder.Append(output).Append(newline);
         }
         var temp = target + ".tmp";
         File.WriteAllText(temp, builder.ToString(), new UTF8Encoding(false));

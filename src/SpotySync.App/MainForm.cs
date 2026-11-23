@@ -31,6 +31,7 @@ public sealed partial class MainForm : Form
     private readonly SoftProgressBar progress = new() { Dock = DockStyle.Fill, Margin = new Padding(8, 24, 18, 24) };
     private readonly ToggleSwitch forceRefresh = new() { Text = "Force full refresh" };
     private readonly RoundedButton cancelButton = RoundedButton.Make("Cancel", ButtonKind.Secondary, Glyph.Stop);
+    private readonly SpeedDial speedDial = new() { Compact = true };
     private readonly RoundedButton applyButton = RoundedButton.Make("Apply reviewed plan", ButtonKind.Primary, Glyph.Check);
     private readonly ConsoleView console;
     private readonly ToolTip tips = Ui.ToolTip();
@@ -71,6 +72,8 @@ public sealed partial class MainForm : Form
         {
             // leftover from the 1.5.0-T3 embedded-browser experiment
             try { var web = Path.Combine(settings.DataDirectory, "WebView2"); if (Directory.Exists(web)) Directory.Delete(web, true); } catch { }
+            if (VersionCarryOver.CarriedFrom is { } carried)
+                AppendLog($"New version: took over your settings, Spotify login and caches from {carried} ({VersionCarryOver.FilesCopied} file(s); nothing there was changed), so nothing has to be re-read from Spotify.");
             RestorePreviewSnapshot();
             await RefreshStatusAsync();
             // a restored preview may predate songs downloaded since: bring its library up to date now
@@ -260,10 +263,11 @@ public sealed partial class MainForm : Form
     private Control BuildStatusBar()
     {
         var bar = new StatusBarPanel { Dock = DockStyle.Bottom, Height = 66, Padding = new Padding(22, 0, 22, 0) };
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, BackColor = Color.Transparent };
+        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 6, RowCount = 1, BackColor = Color.Transparent };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 116));
         grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -279,7 +283,9 @@ public sealed partial class MainForm : Form
         tips.SetToolTip(applyButton, "Apply exactly the reviewed preview (Ctrl+Enter)");
         pauseButton.Dock = DockStyle.Fill; pauseButton.Margin = new Padding(4, 15, 4, 15); pauseButton.AutoSize = false;
         grid.Controls.Add(statusText, 0, 0); grid.Controls.Add(progress, 1, 0); grid.Controls.Add(forceRefresh, 2, 0);
-        grid.Controls.Add(pauseButton, 3, 0); grid.Controls.Add(cancelButton, 4, 0);
+        speedDial.Dock = DockStyle.Fill; speedDial.Margin = new Padding(4, 17, 10, 17);
+        tips.SetToolTip(speedDial, "Download speed: songs downloaded at the same time. Works during a download (the batch restarts at the new speed, finished songs are kept). Scroll or use the arrow keys.");
+        grid.Controls.Add(speedDial, 3, 0); grid.Controls.Add(pauseButton, 4, 0); grid.Controls.Add(cancelButton, 5, 0);
         bar.Controls.Add(grid);
         return bar;
     }
@@ -366,7 +372,7 @@ public sealed partial class MainForm : Form
             using var stall = CancellationTokenSource.CreateLinkedTokenSource(token);
             _ = HintIfLoginStallsAsync(stall.Token);
             string accepted;
-            try { accepted = await service.ConnectSpotifyAsync(token); }
+            try { accepted = await Task.Run(() => service.ConnectSpotifyAsync(token)); }
             finally { stall.Cancel(); }
             if (!accepted.Equals(settings.RedirectUri, StringComparison.OrdinalIgnoreCase))
             {
@@ -385,7 +391,7 @@ public sealed partial class MainForm : Form
         if (!SaveSettingsFields(false)) return;
         await RunBusyAsync("Backing up recent Liked Songs", async token =>
         {
-            var result = await service.BackupRecentLikesAsync(forceRefresh.Checked, token);
+            var result = await Task.Run(() => service.BackupRecentLikesAsync(forceRefresh.Checked, token));
             if (!result.Success)
             {
                 if (!console.Entries.TakeLast(6).Any(e => e.Text.Contains(result.Error, StringComparison.Ordinal))) AppendLog("WARNING: " + result.Error);
@@ -400,12 +406,12 @@ public sealed partial class MainForm : Form
 
     private async Task ManualDownloadAsync()
     {
-        using var dialog = new DownloadLinksDialog();
+        using var dialog = new DownloadLinksDialog(settings);
         if (dialog.ShowDialog(this) != DialogResult.OK) return;
         if (!SaveSettingsFields(false)) return;
         await RunBusyAsync("Downloading pasted links", async token =>
         {
-            var result = await service.DownloadLinksAsync(dialog.Links, token);
+            var result = await Task.Run(() => service.DownloadLinksAsync(dialog.Links, token));
             if (!result.Success)
             {
                 AppendLog("WARNING: " + result.Error);
@@ -423,7 +429,7 @@ public sealed partial class MainForm : Form
         if (!SaveSettingsFields(false)) return;
         await RunBusyAsync("Building a safe sync preview", async token =>
         {
-            prepared = await service.PrepareAsync(forceRefresh.Checked, forceRefresh.Checked, token);
+            prepared = await Task.Run(() => service.PrepareAsync(forceRefresh.Checked, forceRefresh.Checked, token));
             planAppliedAt = null;
             PopulatePlan(prepared.Plan);
             if (libraryReport is not null) BuildLibraryReport(); // keep the Library in step with the new preview
@@ -444,7 +450,7 @@ public sealed partial class MainForm : Form
         if (MessageBox.Show(this, message, "Apply SpotySync plan", MessageBoxButtons.YesNo, removals > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Question) != DialogResult.Yes) return;
         await RunBusyAsync("Applying reviewed playlist plan", async token =>
         {
-            var result = await service.ExecuteAsync(prepared, false, token);
+            var result = await Task.Run(() => service.ExecuteAsync(prepared, false, token));
             foreach (var error in result.Errors) AppendLog("ERROR: " + error);
             SetResult($"Applied: Spotify +{result.SpotifyAdded}/−{result.SpotifyRemoved}; local +{result.LocalAdded}/−{result.LocalRemoved}.", result.Errors.Count > 0 ? Led.Warn : Led.Ok);
             // keep the reviewed plan on screen for reference; it just can't be applied a second time
@@ -464,10 +470,10 @@ public sealed partial class MainForm : Form
         var built = false;
         await RunBusyAsync("Running complete backup and sync", async token =>
         {
-            var backup = await service.BackupRecentLikesAsync(forceRefresh.Checked, token);
+            var backup = await Task.Run(() => service.BackupRecentLikesAsync(forceRefresh.Checked, token));
             if (!backup.Success) AppendLog("WARNING: backup was partial; playlist preview will still continue. " + backup.Error);
             if (backup.ResolvedMusicFolder.Length > 0) musicFolder.Text = backup.ResolvedMusicFolder;
-            prepared = await service.PrepareAsync(forceRefresh.Checked, true, token);
+            prepared = await Task.Run(() => service.PrepareAsync(forceRefresh.Checked, true, token));
             planAppliedAt = null;
             PopulatePlan(prepared.Plan);
             if (libraryReport is not null) BuildLibraryReport();

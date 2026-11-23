@@ -12,6 +12,8 @@ public sealed class DownloadRunResult
     public List<string> ChangedAudio { get; set; } = new();
     public List<string> SkippedTracks { get; set; } = new();
     public List<string> RecoveredFallbackTracks { get; set; } = new();
+    /// <summary>Song names spotDL said it couldn't find on YouTube Music.</summary>
+    public List<string> NotFound { get; set; } = new();
     public bool Succeeded => ExitCode == 0 && ReportedErrors == 0 && ChangedAudio.Count > 0;
 }
 
@@ -20,20 +22,9 @@ public sealed class Downloader
     private static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase) { ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".wav", ".wma", ".aac", ".aiff", ".wv" };
     private const string AccountSleepMin = "4", AccountSleepMax = "10";
 
-    // Download pace (settings: Safe, Balanced, Fast, Max). If YouTube or Spotify start limiting, the pace steps down
-    // one level for the rest of the download and the log says so - that is how the real limit shows up.
-    private static readonly string[] PaceNames = ["Safe", "Balanced", "Fast", "Max"];
-    private static readonly (int Threads, int SleepMin, int SleepMax)[] Paces = [(1, 4, 10), (2, 2, 5), (4, 0, 2), (6, 0, 0)];
-    private int speedLevel = -1;
-    private (int Threads, int SleepMin, int SleepMax) Pace
-    {
-        get
-        {
-            if (speedLevel < 0) speedLevel = Math.Max(0, Array.FindIndex(PaceNames, n => n.Equals(settings.DownloadSpeed?.Trim(), StringComparison.OrdinalIgnoreCase)));
-            if (speedLevel == 0 && !PaceNames[0].Equals(settings.DownloadSpeed?.Trim(), StringComparison.OrdinalIgnoreCase)) speedLevel = 2; // unknown value: Fast
-            return Paces[speedLevel];
-        }
-    }
+    // Download pace comes from the speed dial (DownloadSpeed). If YouTube or Spotify start limiting, it halves for the
+    // rest of the download and the log says so - that is how the real limit shows up.
+    private static DownloadSpeed.Level Pace => DownloadSpeed.Current;
 
     /// <summary>Download file types (setting DownloadFormat). Opus is the default.</summary>
     public static readonly string[] FormatNames = ["Opus", "MP3", "M4A"];
@@ -72,15 +63,14 @@ public sealed class Downloader
     {
         var hit = output.FirstOrDefault(line => RateLimited.IsMatch(line));
         if (hit is null) return;
-        _ = Pace;
-        if (speedLevel == 0)
+        var before = Pace;
+        if (!DownloadSpeed.StepDownForLimit())
         {
-            log("WARNING: YouTube/Spotify is limiting downloads even at Safe speed. Take a break (an hour or more) before downloading again.");
+            log("WARNING: YouTube/Spotify is limiting downloads even at the slowest speed. Take a break (an hour or more) before downloading again.");
             return;
         }
-        speedLevel--;
-        log($"WARNING: hit a rate limit ({hit.Trim()}). Slowing down to {PaceNames[speedLevel]} speed for the rest of this download. " +
-            $"If this keeps happening, set Download speed to {PaceNames[speedLevel]} in Settings.");
+        log($"WARNING: hit a rate limit at {before.Label} ({hit.Trim()}). Slowed down to {Pace.Label}. " +
+            "Turn the speed dial up again later if you like; it is saved only when you change it yourself.");
     }
     private readonly PortableSettings settings;
     private readonly Action<string> log;
@@ -89,6 +79,7 @@ public sealed class Downloader
     {
         this.settings = settings;
         this.log = log ?? (_ => { });
+        DownloadSpeed.Load(settings);
     }
 
     public async Task<DownloadRunResult> RunAsync(IReadOnlyList<string> urls, IReadOnlyList<TrackInfo>? expectedTracks = null, CancellationToken cancellationToken = default)
@@ -101,16 +92,16 @@ public sealed class Downloader
         await UpdateYtDlpIfNeededAsync(Path.GetDirectoryName(executable)!, cancellationToken);
         var primary = IsSpot2Yt(executable)
             ? await RunSpot2YtAsync(executable, urls, expectedTracks ?? Array.Empty<TrackInfo>(), cancellationToken)
-            : await RunOnceAsync(executable, urls, cancellationToken);
+            : await RunOnceAsync(executable, urls, cancellationToken, songData: expectedTracks);
         if (!IsSpot2Yt(executable) && primary.ExitCode != 0 && primary.ChangedAudio.Count == 0)
         {
             // spotDL sometimes crashes while reading Spotify (e.g. "KeyError: 'ownerV2'")
             // and the same link works moments later, so try once more before giving up.
             log($"{primary.DownloaderName} stopped before downloading anything; retrying once in 15 seconds.");
             await Task.Delay(TimeSpan.FromSeconds(15), cancellationToken);
-            primary = await RunOnceAsync(executable, urls, cancellationToken);
+            primary = await RunOnceAsync(executable, urls, cancellationToken, songData: expectedTracks);
         }
-        var custom =Path.Combine(settings.BaseDirectory, "Tools", "spot2yt.exe");
+        var custom =Path.Combine(settings.BaseDirectory, "Tools", Platform.Exe("spot2yt"));
         if (!IsSpot2Yt(executable) && !primary.Succeeded && File.Exists(custom) && CustomDownloaderIsConfigured(custom))
         {
             log($"{primary.DownloaderName} produced no verified audio or reported errors; retrying with bundled spot2yt.");
@@ -136,7 +127,7 @@ public sealed class Downloader
     }
 
     public string FfprobePath =>
-        Path.Combine(Path.GetDirectoryName(settings.ResolvePath(settings.DownloaderPath)) ?? settings.BaseDirectory, "ffprobe.exe");
+        Path.Combine(Path.GetDirectoryName(settings.ResolvePath(settings.DownloaderPath)) ?? settings.BaseDirectory, Platform.Exe("ffprobe"));
 
     public async Task<DownloadRunResult> RunManualAsync(IReadOnlyList<string> urls, IReadOnlyList<TrackInfo>? expectedTracks = null, CancellationToken cancellationToken = default)
     {
@@ -209,7 +200,7 @@ public sealed class Downloader
     private async Task<DownloadRunResult> RunYtDlpAsync(IReadOnlyList<string> urls, CancellationToken cancellationToken)
     {
         var toolDirectory = Path.Combine(settings.BaseDirectory, "Tools");
-        var executable = Path.Combine(toolDirectory, "yt-dlp.exe");
+        var executable = Path.Combine(toolDirectory, Platform.Exe("yt-dlp"));
         if (!File.Exists(executable)) throw new FileNotFoundException("The bundled yt-dlp.exe was not found in Tools.", executable);
         await UpdateYtDlpIfNeededAsync(toolDirectory, cancellationToken);
         // A signed-in browser (YouTube Premium) unlocks the ~256 kbps streams, so use it first.
@@ -217,7 +208,7 @@ public sealed class Downloader
         var primary = await RunYtDlpOnceAsync(executable, urls, browser, null, false, null, cancellationToken);
         if (!primary.Succeeded && browser is not null)
         {
-            log($"Direct media download with {browser} cookies produced no audio; retrying once without them.");
+            log($"Direct media download with {BrowserName(browser)} cookies produced no audio; retrying once without them.");
             var retry = await RunYtDlpOnceAsync(executable, urls, null, null, false, null, cancellationToken);
             retry.ChangedAudio = primary.ChangedAudio.Concat(retry.ChangedAudio).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             return retry;
@@ -263,10 +254,10 @@ public sealed class Downloader
             start.ArgumentList.Add("--cookies-from-browser");
             start.ArgumentList.Add(cookieBrowser);
             // pauses between signed-in downloads follow the Download speed setting
-            if (Pace.SleepMax > 0)
+            if (Pace.PauseMax > 0)
             {
-                start.ArgumentList.Add("--sleep-interval"); start.ArgumentList.Add(Pace.SleepMin.ToString());
-                start.ArgumentList.Add("--max-sleep-interval"); start.ArgumentList.Add(Pace.SleepMax.ToString());
+                start.ArgumentList.Add("--sleep-interval"); start.ArgumentList.Add(Pace.PauseMin.ToString());
+                start.ArgumentList.Add("--max-sleep-interval"); start.ArgumentList.Add(Pace.PauseMax.ToString());
             }
         }
         start.ArgumentList.Add("--output");
@@ -295,7 +286,7 @@ public sealed class Downloader
         {
             ExitCode = process.ExitCode,
             ReportedErrors = output.Count(IsDownloaderError),
-            DownloaderName = "yt-dlp.exe",
+            DownloaderName = Platform.Exe("yt-dlp"),
             OutputFolder = musicFolder,
             ChangedAudio = after.Where(x => !before.TryGetValue(x.Key, out var old) || old != x.Value).Select(x => x.Key).ToList()
         };
@@ -331,7 +322,8 @@ public sealed class Downloader
         return Merge(results);
     }
 
-    private async Task<DownloadRunResult> RunOnceAsync(string executable, IReadOnlyList<string> urls, CancellationToken cancellationToken, string overwriteMode = "skip")
+    private async Task<DownloadRunResult> RunOnceAsync(string executable, IReadOnlyList<string> urls, CancellationToken cancellationToken,
+        string overwriteMode = "skip", IReadOnlyList<TrackInfo>? songData = null)
     {
         var musicFolder = settings.ResolvePath(settings.MusicFolder);
         Directory.CreateDirectory(musicFolder);
@@ -357,37 +349,19 @@ public sealed class Downloader
         // the legacy Windows code page; UTF-8 output keeps the run going.
         start.Environment["PYTHONIOENCODING"] = "utf-8";
         start.Environment["PYTHONUTF8"] = "1";
+        // spotDL's console library wraps lines at 80 characters when it isn't writing to a window, which split song
+        // names over several log lines (and broke reading them). A wide console keeps each message on one line.
+        start.Environment["COLUMNS"] = "1000";
+        notFoundThisRun.Clear();
         string? premiumBrowser = null;
+        string? songFile = null;
+        var directUrls = urls;
         if (!isSpot2Yt)
         {
-            start.ArgumentList.Add("download");
-            foreach (var url in urls) start.ArgumentList.Add(url);
-            start.ArgumentList.Add("--output");
-            start.ArgumentList.Add(Path.Combine(musicFolder, "{artists} - {title}.{output-ext}"));
-            start.ArgumentList.Add("--overwrite");
-            start.ArgumentList.Add(overwriteMode);
-            foreach (var argument in SpotDlFormatArguments(settings.DownloadFormat)) start.ArgumentList.Add(argument);
-            var browser = ConfiguredCookieBrowser(toolDirectory);
-            if (browser is not null)
-            {
-                // Signed in (YouTube Premium): spotDL's built-in yt-dlp then sees the ~256 kbps
-                // streams (needs the bgutil PO-token plugin). One song at a time, with pauses.
-                var pace = Pace;
-                log($"Using the signed-in {browser} YouTube session for higher-quality audio ({PaceNames[speedLevel]} speed: {pace.Threads} song(s) at a time" +
-                    (pace.SleepMax > 0 ? $", {pace.SleepMin}-{pace.SleepMax} s pauses)." : ", no pauses)."));
-                premiumBrowser = browser;
-                start.ArgumentList.Add("--threads");
-                start.ArgumentList.Add(pace.Threads.ToString());
-                start.ArgumentList.Add("--yt-dlp-args");
-                start.ArgumentList.Add($"--cookies-from-browser {browser}" + (pace.SleepMax > 0 ? $" --sleep-interval {pace.SleepMin} --max-sleep-interval {pace.SleepMax}" : "") +
-                    string.Concat(PoTokenHelperArgs(toolDirectory).Select(argument => " " + (argument.StartsWith("--") ? argument : "\"" + argument + "\""))));
-            }
-            else
-            {
-                start.ArgumentList.Add("--threads");
-                start.ArgumentList.Add(Math.Max(2, Pace.Threads).ToString());
-            }
-            start.ArgumentList.Add("--print-errors");
+            premiumBrowser = ConfiguredCookieBrowser(toolDirectory);
+            // Songs SpotySync already knows go to spotDL as a song file, so spotDL never asks Spotify about them
+            // (its shared Spotify key is so rate-limited that every lookup took ~13 s).
+            (songFile, directUrls) = await WriteSongFileAsync(urls, songData, cancellationToken);
         }
         if (premiumBrowser is not null)
         {
@@ -395,32 +369,137 @@ public sealed class Downloader
             await WarmUpPoTokenHelperAsync(toolDirectory, cancellationToken); // keep it warm for this batch
         }
 
-        await DownloadProcesses.WaitIfPausedAsync(cancellationToken);
-        using var process = DownloadProcesses.Start(start);
-        var stdout = isSpot2Yt
-            ? PumpSpot2YtAsync(process.StandardOutput, process.StandardInput, cancellationToken)
-            : PumpAsync(process.StandardOutput, "download", cancellationToken);
-        var stderr = PumpAsync(process.StandardError, "download", cancellationToken);
-        List<string> output;
+        var output = new List<string>();
+        var rawExitCode = 0;
         try
         {
-            if (isSpot2Yt)
+            while (true)
             {
-                foreach (var url in urls)
+                var pace = Pace;
+                var speedVersion = DownloadSpeed.Version;
+                if (!isSpot2Yt)
                 {
-                    log("Submitting to spot2yt: " + url);
-                    await process.StandardInput.WriteLineAsync(url.AsMemory(), cancellationToken);
-                    await process.StandardInput.FlushAsync(cancellationToken);
+                    start.ArgumentList.Clear();
+                    start.ArgumentList.Add("download");
+                    if (songFile is not null) start.ArgumentList.Add(songFile);
+                    foreach (var url in directUrls) start.ArgumentList.Add(url);
+                    start.ArgumentList.Add("--output");
+                    start.ArgumentList.Add(Path.Combine(musicFolder, "{artists} - {title}.{output-ext}"));
+                    start.ArgumentList.Add("--overwrite");
+                    start.ArgumentList.Add(overwriteMode);
+                    foreach (var argument in SpotDlFormatArguments(settings.DownloadFormat)) start.ArgumentList.Add(argument);
+                    // No lyrics: Genius answers 429 and Musixmatch 403 to spotDL's shared keys, so every song waited
+                    // ~20 s for lyrics it never got.
+                    start.ArgumentList.Add("--lyrics");
+                    start.ArgumentList.Add("--threads");
+                    start.ArgumentList.Add(pace.Threads.ToString());
+                    var ytDlpArgs = new List<string>();
+                    if (premiumBrowser is not null)
+                    {
+                        // Signed in (YouTube Premium): spotDL's built-in yt-dlp then sees the ~256 kbps
+                        // streams (needs the bgutil PO-token plugin).
+                        log($"Using the signed-in {BrowserName(premiumBrowser)} YouTube session for higher-quality audio ({pace.Label}" +
+                            (pace.PauseMax > 0 ? ")." : ", no pauses)."));
+                        ytDlpArgs.Add("--cookies-from-browser " + premiumBrowser);
+                        ytDlpArgs.AddRange(PoTokenHelperArgs(toolDirectory).Select(argument => argument.StartsWith("--") ? argument : "\"" + argument + "\""));
+                    }
+                    else log($"Downloading {pace.Label}.");
+                    if (pace.PauseMax > 0) ytDlpArgs.Add($"--sleep-interval {pace.PauseMin} --max-sleep-interval {pace.PauseMax}");
+                    if (ytDlpArgs.Count > 0)
+                    {
+                        start.ArgumentList.Add("--yt-dlp-args");
+                        start.ArgumentList.Add(string.Join(' ', ytDlpArgs));
+                    }
+                    start.ArgumentList.Add("--print-errors");
                 }
+
+                await DownloadProcesses.WaitIfPausedAsync(cancellationToken);
+                Interlocked.Exchange(ref errorStreak, 0);
+                lastFailedVideo = null;
+                using var process = DownloadProcesses.Start(start);
+                var stdout = isSpot2Yt
+                    ? PumpSpot2YtAsync(process.StandardOutput, process.StandardInput, cancellationToken)
+                    : PumpAsync(process.StandardOutput, "download", cancellationToken);
+                var stderr = PumpAsync(process.StandardError, "download", cancellationToken);
+                var restarted = false;
+                Task<string?>? rateCheck = null;
+                string? rateLimitReason = null;
+                try
+                {
+                    if (isSpot2Yt)
+                    {
+                        foreach (var url in urls)
+                        {
+                            log("Submitting to spot2yt: " + url);
+                            await process.StandardInput.WriteLineAsync(url.AsMemory(), cancellationToken);
+                            await process.StandardInput.FlushAsync(cancellationToken);
+                        }
+                        await process.WaitForExitAsync(cancellationToken);
+                    }
+                    else
+                    {
+                        // A speed change while spotDL runs restarts it at the new speed. Finished songs are kept and
+                        // skipped at once (they come from the song file, so there is nothing to look up).
+                        var exited = process.WaitForExitAsync(cancellationToken);
+                        while (!exited.IsCompleted)
+                        {
+                            await Task.WhenAny(exited, Task.Delay(400, cancellationToken));
+                            cancellationToken.ThrowIfCancellationRequested();
+                            // a run of failed songs: ask YouTube once why (spotDL hides the reason)
+                            if (rateCheck is null && Volatile.Read(ref errorStreak) >= RateLimitStreak && lastFailedVideo is { } probeUrl)
+                                rateCheck = RateLimitReasonAsync(toolDirectory, premiumBrowser, probeUrl, cancellationToken);
+                            if (rateCheck is { IsCompleted: true })
+                            {
+                                rateLimitReason = await rateCheck;
+                                rateCheck = null;
+                                if (rateLimitReason is not null)
+                                {
+                                    restarted = true;
+                                    StopProcess(process);
+                                    break;
+                                }
+                                Interlocked.Exchange(ref errorStreak, 0); // something else failed them; keep going
+                            }
+                            if (exited.IsCompleted || DownloadSpeed.Version == speedVersion) continue;
+                            await Task.Delay(1500, cancellationToken); // let a quick run of clicks settle
+                            if (exited.IsCompleted) break;
+                            log($"Download speed changed to {Pace.Label}; restarting this batch at the new speed (finished songs are kept).");
+                            restarted = true;
+                            StopProcess(process);
+                            break;
+                        }
+                        await exited.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken).ContinueWith(_ => { }, TaskScheduler.Default);
+                    }
+                    output.AddRange((await Task.WhenAll(stdout, stderr)).SelectMany(lines => lines));
+                    await Task.Delay(500, cancellationToken);
+                    // the batch also ends quickly when YouTube refuses every song
+                    if (!isSpot2Yt && !restarted && Volatile.Read(ref errorStreak) >= RateLimitStreak && lastFailedVideo is { } endUrl)
+                    {
+                        rateLimitReason = await (rateCheck ?? RateLimitReasonAsync(toolDirectory, premiumBrowser, endUrl, cancellationToken));
+                        restarted = rateLimitReason is not null;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    StopProcess(process);
+                    throw;
+                }
+                if (rateLimitReason is not null)
+                {
+                    ForgetNotFoundSince(streakStartedUtc);
+                    // the refused songs are retried, so their errors don't count against the batch
+                    output.RemoveAll(line => line.Contains("AudioProviderError", StringComparison.Ordinal));
+                    await WaitOutRateLimitAsync(toolDirectory, premiumBrowser, lastFailedVideo!, rateLimitReason, cancellationToken);
+                    continue;
+                }
+                if (restarted) continue;
+                rawExitCode = process.ExitCode;
+                break;
             }
-            await process.WaitForExitAsync(cancellationToken);
-            output = (await Task.WhenAll(stdout, stderr)).SelectMany(lines => lines).ToList();
-            await Task.Delay(500, cancellationToken);
         }
-        catch (OperationCanceledException)
+        finally
         {
-            StopProcess(process);
-            throw;
+            if (songFile is not null) try { File.Delete(songFile); } catch { }
         }
         var after = Snapshot(musicFolder);
         var changed = after.Where(x => !before.TryGetValue(x.Key, out var old) || old != x.Value).Select(x => x.Key).ToList();
@@ -436,9 +515,9 @@ public sealed class Downloader
         BackOffIfLimited(output);
         var reportedErrors = output.Count(IsDownloaderError);
         // spotDL exits 1 when only its closing progress display crashed on a song name: that is not a failed run
-        var exitCode = process.ExitCode != 0 && reportedErrors == 0 && output.Contains(CosmeticExitMarker) ? 0 : process.ExitCode;
+        var exitCode = rawExitCode != 0 && reportedErrors == 0 && output.Contains(CosmeticExitMarker) ? 0 : rawExitCode;
         var skippedTracks = ExtractSkippedTrackNames(output);
-        if (process.ExitCode == 0 && reportedErrors > 0)
+        if (rawExitCode == 0 && reportedErrors > 0)
             log($"WARNING: {Path.GetFileName(executable)} returned exit code 0 but reported {reportedErrors} download error line(s).");
         return new DownloadRunResult
         {
@@ -446,8 +525,206 @@ public sealed class Downloader
             DownloaderName = Path.GetFileName(executable),
             OutputFolder = reportedOutputFolder ?? musicFolder,
             ChangedAudio = changed,
-            SkippedTracks = skippedTracks
+            SkippedTracks = skippedTracks,
+            NotFound = notFoundThisRun.Keys.ToList()
         };
+    }
+
+    // songs spotDL couldn't find during the current run (each is logged once, even when the batch restarts), with when
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> notFoundThisRun = new(StringComparer.OrdinalIgnoreCase);
+
+    // YouTube rate limits: spotDL only says "YT-DLP download error", so a run of those in a row is checked with yt-dlp
+    private const int RateLimitStreak = 12;
+    private static readonly TimeSpan RateLimitRecheck = TimeSpan.FromMinutes(10);
+    private int errorStreak;
+    private DateTime streakStartedUtc;
+    private volatile string? lastFailedVideo;
+    private static readonly System.Text.RegularExpressions.Regex VideoLink = new(
+        @"https?://(?:music|www)\.youtube\.com/watch\?v=[\w-]{11}", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>Asks yt-dlp about one failed song; returns YouTube's rate-limit message, or null when it isn't one.</summary>
+    private async Task<string?> RateLimitReasonAsync(string toolDirectory, string? browser, string url, CancellationToken cancellationToken)
+    {
+        var probe = await ProbeFormatsAsync(toolDirectory, browser, url, cancellationToken);
+        return probe.Diagnostics.FirstOrDefault(line => line.StartsWith("ERROR", StringComparison.Ordinal) && RateLimited.IsMatch(line));
+    }
+
+    /// <summary>YouTube's message without yt-dlp's prefix and advice, e.g. "Your account has been rate-limited by YouTube for up to an hour."</summary>
+    public static string RateLimitMessage(string line)
+    {
+        var text = System.Text.RegularExpressions.Regex.Replace(line, @"^ERROR:\s*(?:\[[^\]]+\]\s*)?(?:[\w-]{11}:\s*)?", "");
+        var limited = text.IndexOf("Your account", StringComparison.OrdinalIgnoreCase);
+        if (limited > 0) text = text[limited..];
+        var advice = text.IndexOf(" It is recommended", StringComparison.OrdinalIgnoreCase);
+        if (advice > 0) text = text[..advice];
+        return text.Length > 200 ? text[..200] + "…" : text.Trim();
+    }
+
+    /// <summary>"Not on YouTube Music" results that came in while YouTube was refusing songs aren't trusted; the retry checks them again.</summary>
+    private void ForgetNotFoundSince(DateTime sinceUtc)
+    {
+        var doubtful = notFoundThisRun.Where(p => p.Value >= sinceUtc.AddMinutes(-2)).Select(p => p.Key).ToList();
+        foreach (var name in doubtful) notFoundThisRun.TryRemove(name, out _);
+        if (doubtful.Count > 0)
+            log($"{doubtful.Count} song(s) that looked like they weren't on YouTube Music during the limit will be searched again.");
+    }
+
+    /// <summary>
+    /// Waits out a YouTube rate limit: slows down, checks every 10 minutes, and returns once YouTube serves songs again.
+    /// The batch then restarts; finished songs are skipped and the failed ones are tried again.
+    /// </summary>
+    private async Task WaitOutRateLimitAsync(string toolDirectory, string? browser, string url, string reason, CancellationToken cancellationToken)
+    {
+        var before = Pace;
+        var slowed = DownloadSpeed.StepDownForLimit();
+        log($"YouTube rate limit: {RateLimitMessage(reason)} Downloading waits and continues by itself once YouTube allows it again; " +
+            "the songs that failed are retried" + (slowed ? $". Slowed down from {before.Label} to {Pace.Label}." : "."));
+        var started = DateTime.Now;
+        while (true)
+        {
+            log($"YouTube rate limit: checking again at {DateTime.Now.Add(RateLimitRecheck):HH:mm}" +
+                (DateTime.Now - started >= RateLimitRecheck ? $" (waiting {(DateTime.Now - started).TotalMinutes:0} min so far)" : "") +
+                ". Press Stop to end the download instead.");
+            await Task.Delay(RateLimitRecheck, cancellationToken);
+            await DownloadProcesses.WaitIfPausedAsync(cancellationToken);
+            if (await RateLimitReasonAsync(toolDirectory, browser, url, cancellationToken) is null) break;
+        }
+        log($"YouTube rate limit lifted after {(DateTime.Now - started).TotalMinutes:0} min; continuing at {Pace.Label}.");
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex SpotifyTrackLink = new(
+        @"(?:open\.spotify\.com/(?:intl-[A-Za-z-]+/)?track/|spotify:track:)([A-Za-z0-9]{22})", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly HttpClient CoverHttp = new() { Timeout = TimeSpan.FromSeconds(5) };
+    private static bool coverLookupUnavailable;
+
+    private string SongFileFolder => Path.Combine(settings.DataDirectory, "spotdl-queue");
+    private string CoverCachePath => Path.Combine(settings.DataDirectory, "cover-cache.json");
+
+    /// <summary>
+    /// Writes a spotDL song file (.spotdl) for the Spotify track links SpotySync already has details for. spotDL reads
+    /// those songs straight from the file and never asks Spotify about them. Links without details are returned so
+    /// spotDL looks them up itself as before. A song without a saved cover still goes in the file: spotDL then uses
+    /// the YouTube Music cover (checked with spotDL 4.6).
+    /// </summary>
+    internal async Task<(string? File, IReadOnlyList<string> Others)> WriteSongFileAsync(IReadOnlyList<string> urls,
+        IReadOnlyList<TrackInfo>? songData, CancellationToken cancellationToken)
+    {
+        if (songData is null || songData.Count == 0) return (null, urls);
+        var byId = songData.Where(t => t.SpotifyId.Length > 0 && t.Title.Length > 0 && t.Artists.Count > 0 && !t.IsLocal)
+            .GroupBy(t => t.SpotifyId, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        var songs = new List<TrackInfo>();
+        var rest = new List<string>();
+        foreach (var url in urls)
+        {
+            var match = SpotifyTrackLink.Match(url);
+            if (match.Success && byId.TryGetValue(match.Groups[1].Value, out var track) && songs.All(s => s.SpotifyId != track.SpotifyId)) songs.Add(track);
+            else rest.Add(url);
+        }
+        if (songs.Count == 0) return (null, urls);
+        await FillMissingCoversAsync(songs, cancellationToken);
+        // songs YouTube Music didn't have, for which the user pasted a YouTube link: spotDL downloads that link
+        var links = NotFoundSongs.Load(settings).Songs.Values.Where(s => s.ManualUrl.Length > 0)
+            .ToDictionary(s => s.SpotifyId, s => s.ManualUrl, StringComparer.OrdinalIgnoreCase);
+
+        Directory.CreateDirectory(SongFileFolder);
+        foreach (var old in Directory.GetFiles(SongFileFolder, "*.spotdl"))
+            if (File.GetLastWriteTimeUtc(old) < DateTime.UtcNow.AddDays(-1)) try { File.Delete(old); } catch { }
+        var file = Path.Combine(SongFileFolder, "queue-" + Guid.NewGuid().ToString("N") + ".spotdl");
+        await File.WriteAllTextAsync(file, JsonSerializer.Serialize(songs.Select(s => SpotDlSong(s, links.GetValueOrDefault(s.SpotifyId)))), cancellationToken);
+        var linked = songs.Count(s => links.ContainsKey(s.SpotifyId));
+        if (linked > 0) log($"{linked} song(s) download from the YouTube link you added for them.");
+        log($"{songs.Count} song(s) go to spotDL with SpotySync's own song details, so it doesn't look them up on Spotify" +
+            (rest.Count > 0 ? $"; spotDL looks up the other {rest.Count} link(s) itself." : "."));
+        return (file, rest);
+    }
+
+    /// <summary>One song in spotDL 4's save-file format (every field its Song type needs, so it never re-reads Spotify).</summary>
+    public static Dictionary<string, object?> SpotDlSong(TrackInfo track) => SpotDlSong(track, null);
+
+    /// <summary>As above; with <paramref name="downloadUrl"/> spotDL skips its search and downloads that link.</summary>
+    public static Dictionary<string, object?> SpotDlSong(TrackInfo track, string? downloadUrl)
+    {
+        var date = track.ReleaseDate.Trim();
+        var year = date.Length >= 4 && int.TryParse(date[..4], out var y) ? y : 0;
+        var trackNumber = track.TrackNumber > 0 ? track.TrackNumber : 1;
+        var discNumber = track.DiscNumber > 0 ? track.DiscNumber : 1;
+        return new Dictionary<string, object?>
+        {
+            ["name"] = track.Title,
+            ["artists"] = track.Artists,
+            ["artist"] = track.Artists[0],
+            ["genres"] = Array.Empty<string>(),
+            ["disc_number"] = discNumber,
+            ["disc_count"] = discNumber,
+            ["album_name"] = track.Album.Length > 0 ? track.Album : track.Title,
+            ["album_artist"] = track.AlbumArtist.Length > 0 ? track.AlbumArtist : track.Artists[0],
+            ["duration"] = track.DurationMs / 1000.0,
+            ["year"] = year,
+            ["date"] = date,
+            ["track_number"] = trackNumber,
+            ["tracks_count"] = Math.Max(trackNumber, track.AlbumTrackCount),
+            ["song_id"] = track.SpotifyId,
+            ["explicit"] = track.Explicit,
+            ["publisher"] = "",
+            ["url"] = "https://open.spotify.com/track/" + track.SpotifyId,
+            ["isrc"] = track.Isrc.Length > 0 ? track.Isrc : null,
+            ["cover_url"] = track.CoverUrl.Length > 0 ? track.CoverUrl : null,
+            ["copyright_text"] = null,
+            ["download_url"] = string.IsNullOrWhiteSpace(downloadUrl) ? null : downloadUrl.Trim(),
+            ["lyrics"] = null,
+            ["popularity"] = null,
+            // spotDL 4.6 re-reads the song from Spotify whenever album_id is empty (and drops it if that fails); only
+            // --fetch-albums uses the id, so any non-empty value keeps it from asking Spotify.
+            ["album_id"] = track.SpotifyId,
+            ["list_name"] = null,
+            ["list_url"] = null,
+            ["list_position"] = null,
+            ["list_length"] = null,
+            ["artist_id"] = null,
+            ["album_type"] = null
+        };
+    }
+
+    /// <summary>
+    /// Songs read from Spotify before 1.5.6 have no cover picture saved. Spotify's public embed page gives it without
+    /// using the Spotify app's request allowance; results are remembered in Data\cover-cache.json.
+    /// </summary>
+    private async Task FillMissingCoversAsync(List<TrackInfo> songs, CancellationToken cancellationToken)
+    {
+        var missing = songs.Where(t => t.CoverUrl.Length == 0).ToList();
+        if (missing.Count == 0) return;
+        var cache = JsonStore.Load(CoverCachePath, () => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+        cache = new Dictionary<string, string>(cache, StringComparer.OrdinalIgnoreCase);
+        foreach (var track in missing)
+            if (cache.TryGetValue(track.SpotifyId, out var known)) track.CoverUrl = known;
+        missing = missing.Where(t => t.CoverUrl.Length == 0).ToList();
+        if (missing.Count == 0 || coverLookupUnavailable) return;
+
+        var found = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var failures = 0;
+        await Parallel.ForEachAsync(missing, new ParallelOptions { MaxDegreeOfParallelism = 8, CancellationToken = cancellationToken }, async (track, token) =>
+        {
+            if (coverLookupUnavailable) return;
+            try
+            {
+                var link = Uri.EscapeDataString("https://open.spotify.com/track/" + track.SpotifyId);
+                using var response = await CoverHttp.GetAsync("https://open.spotify.com/oembed?url=" + link, token);
+                if (!response.IsSuccessStatusCode) throw new HttpRequestException(((int)response.StatusCode).ToString());
+                using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token));
+                var thumbnail = doc.RootElement.TryGetProperty("thumbnail_url", out var value) ? value.GetString() ?? "" : "";
+                // the embed gives the 300 px picture; the same image id with this prefix is the 640 px one
+                if (thumbnail.Length > 0) found[track.SpotifyId] = thumbnail.Replace("ab67616d00001e02", "ab67616d0000b273");
+            }
+            catch (Exception) when (!token.IsCancellationRequested)
+            {
+                if (Interlocked.Increment(ref failures) >= 8 && found.IsEmpty) coverLookupUnavailable = true;
+            }
+        });
+        foreach (var track in missing)
+            if (found.TryGetValue(track.SpotifyId, out var url)) { track.CoverUrl = url; cache[track.SpotifyId] = url; }
+        if (!found.IsEmpty) try { JsonStore.SaveAtomic(CoverCachePath, cache); } catch { }
+        if (coverLookupUnavailable)
+            log("Couldn't reach Spotify's public page for album covers; songs without a saved cover get the YouTube Music cover instead.");
     }
 
     private async Task<DownloadRunResult> RecoverSkippedTracksAsync(DownloadRunResult primary,
@@ -491,16 +768,16 @@ public sealed class Downloader
     private async Task<DownloadRunResult> RunYouTubeFallbackAsync(TrackInfo track, CancellationToken cancellationToken)
     {
         var toolDirectory = Path.Combine(settings.BaseDirectory, "Tools");
-        var executable = Path.Combine(toolDirectory, "yt-dlp.exe");
+        var executable = Path.Combine(toolDirectory, Platform.Exe("yt-dlp"));
         if (!File.Exists(executable))
-            return new DownloadRunResult { ExitCode = 2, ReportedErrors = 1, DownloaderName = "yt-dlp.exe", SkippedTracks = new() { track.DisplayName } };
+            return new DownloadRunResult { ExitCode = 2, ReportedErrors = 1, DownloaderName = Platform.Exe("yt-dlp"), SkippedTracks = new() { track.DisplayName } };
         await UpdateYtDlpIfNeededAsync(toolDirectory, cancellationToken);
 
         var candidate = await FindYouTubeCandidateAsync(executable, track, cancellationToken);
         if (candidate is null)
         {
             log($"WARNING: no matching public audio source was found for {track.DisplayName}; it remains skipped.");
-            return new DownloadRunResult { ExitCode = 2, ReportedErrors = 1, DownloaderName = "yt-dlp.exe", SkippedTracks = new() { track.DisplayName } };
+            return new DownloadRunResult { ExitCode = 2, ReportedErrors = 1, DownloaderName = Platform.Exe("yt-dlp"), SkippedTracks = new() { track.DisplayName } };
         }
 
         log($"Public-source recovery selected: {candidate.Title} ({candidate.Uploader}).");
@@ -518,7 +795,7 @@ public sealed class Downloader
             var result = await RunYtDlpOnceAsync(executable, new[] { candidate.Url }, browser, outputTemplate, true, candidate.DownloadSection, cancellationToken);
             if (result.ChangedAudio.Count == 0 && browser is not null)
             {
-                log($"Public-source recovery with {browser} cookies produced no audio; retrying once without them.");
+                log($"Public-source recovery with {BrowserName(browser)} cookies produced no audio; retrying once without them.");
                 var retry = await RunYtDlpOnceAsync(executable, new[] { candidate.Url }, null, outputTemplate, true, candidate.DownloadSection, cancellationToken);
                 retry.ChangedAudio = result.ChangedAudio.Concat(retry.ChangedAudio).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                 result = retry;
@@ -735,7 +1012,7 @@ public sealed class Downloader
 
     private async Task<bool> ApplySpotifyMetadataAsync(string file, TrackInfo track, CancellationToken cancellationToken)
     {
-        var ffmpeg = Path.Combine(settings.BaseDirectory, "Tools", "ffmpeg.exe");
+        var ffmpeg = Path.Combine(settings.BaseDirectory, "Tools", Platform.Exe("ffmpeg"));
         if (!File.Exists(ffmpeg)) return false;
         var temporary = Path.Combine(Path.GetDirectoryName(file)!, ".spotysync-tags-" + Guid.NewGuid().ToString("N") + Path.GetExtension(file));
         var originalTimestamp = File.GetLastWriteTimeUtc(file);
@@ -819,11 +1096,30 @@ public sealed class Downloader
                 }
                 if (bare == "Error in sys.excepthook:")
                 {
+                    // spotDL's progress display crashed on a song name while closing: nothing failed, so nothing to show
                     afterExcepthook = true;
                     lines.Add(CosmeticExitMarker);
-                    log(prefix + " | spotDL finished; its progress display couldn't show a song name with special characters when closing (harmless).");
                     continue;
                 }
+                if (bare.Contains("YouTube Music returned no usable results", StringComparison.OrdinalIgnoreCase))
+                {
+                    // one empty search; spotDL still tries other searches, and its final verdict is the LookupError line
+                    lines.Add(line);
+                    continue;
+                }
+                if (NotFoundSongs.NameFromDownloaderLine(bare) is { } missing)
+                {
+                    lines.Add(line);
+                    if (notFoundThisRun.TryAdd(missing, DateTime.UtcNow)) log(prefix + " | Not on YouTube Music: " + missing);
+                    continue;
+                }
+                if (bare.StartsWith("AudioProviderError:", StringComparison.Ordinal))
+                {
+                    var video = VideoLink.Match(bare);
+                    if (video.Success) lastFailedVideo = video.Value;
+                    if (Interlocked.Increment(ref errorStreak) == 1) streakStartedUtc = DateTime.UtcNow;
+                }
+                else if (bare.StartsWith("Downloaded \"", StringComparison.Ordinal)) Interlocked.Exchange(ref errorStreak, 0);
                 var progress = ProgressLine.Match(line.TrimStart());
                 if (progress.Success)
                 {
@@ -968,7 +1264,7 @@ public sealed class Downloader
     private async Task UpdateYtDlpIfNeededAsync(string toolDirectory, CancellationToken cancellationToken)
     {
         if (!settings.AutoUpdateYtDlp) return;
-        var executable = Path.Combine(toolDirectory, "yt-dlp.exe");
+        var executable = Path.Combine(toolDirectory, Platform.Exe("yt-dlp"));
         if (!File.Exists(executable)) return;
         var marker = Path.Combine(toolDirectory, ".ytdlp_last_update_check");
         try
@@ -1041,7 +1337,7 @@ public sealed class Downloader
             var probe = await ProbeFormatsAsync(toolDirectory, browser, PremiumProbeUrl, cancellationToken);
             if (probe.Premium == true)
             {
-                log($"Premium audio check passed: YouTube is offering the ~256 kbps streams to your {browser} session.");
+                log($"Premium audio check passed: YouTube is offering the ~256 kbps streams to your {BrowserName(browser)} session.");
                 return lastPremiumResult = true;
             }
             foreach (var line in probe.Diagnostics.Take(8)) log("Premium check | " + line);
@@ -1051,11 +1347,11 @@ public sealed class Downloader
         var detail = await ProbeFormatsAsync(toolDirectory, browser, PremiumProbeUrl, cancellationToken, verbose: true);
         if (detail.Premium == true)
         {
-            log($"Premium audio check passed on the detailed retry: YouTube is offering the ~256 kbps streams to your {browser} session.");
+            log($"Premium audio check passed on the detailed retry: YouTube is offering the ~256 kbps streams to your {BrowserName(browser)} session.");
             return lastPremiumResult = true;
         }
         foreach (var line in detail.Diagnostics.Take(40)) log("Premium debug | " + (line.Length > 400 ? line[..400] + "…" : line));
-        log($"WARNING: Premium audio check FAILED: YouTube is not offering the ~256 kbps streams to your {browser} session right now, " +
+        log($"WARNING: Premium audio check FAILED: YouTube is not offering the ~256 kbps streams to your {BrowserName(browser)} session right now, " +
             "so songs will download at ~128 kbps. Make sure you are signed in to YouTube in that browser, then cancel and try again.");
         return lastPremiumResult = false;
     }
@@ -1074,16 +1370,16 @@ public sealed class Downloader
     private static List<string> PoTokenHelperArgs(string toolDirectory)
     {
         var arguments = new List<string>();
-        var deno = Path.Combine(toolDirectory, "deno.exe");
+        var deno = Path.Combine(toolDirectory, Platform.Exe("deno"));
         var serverHome = PoTokenServerHome(toolDirectory);
         if (File.Exists(deno)) { arguments.Add("--js-runtimes"); arguments.Add("deno:" + deno.Replace('\\', '/')); }
         if (Directory.Exists(serverHome)) { arguments.Add("--extractor-args"); arguments.Add("youtubepot-bgutilscript:server_home=" + serverHome.Replace('\\', '/')); }
         return arguments;
     }
 
-    private async Task<FormatProbe> ProbeFormatsAsync(string toolDirectory, string browser, string url, CancellationToken cancellationToken, bool verbose = false)
+    private async Task<FormatProbe> ProbeFormatsAsync(string toolDirectory, string? browser, string url, CancellationToken cancellationToken, bool verbose = false)
     {
-        var ytDlp = Path.Combine(toolDirectory, "yt-dlp.exe");
+        var ytDlp = Path.Combine(toolDirectory, Platform.Exe("yt-dlp"));
         if (!File.Exists(ytDlp)) return new FormatProbe(null, false, new List<string> { "yt-dlp.exe is missing from Tools." });
         var start = new ProcessStartInfo(ytDlp)
         {
@@ -1092,7 +1388,8 @@ public sealed class Downloader
         };
         start.Environment["PATH"] = toolDirectory + Path.PathSeparator + (Environment.GetEnvironmentVariable("PATH") ?? string.Empty);
         if (verbose) start.ArgumentList.Add("-v");
-        foreach (var argument in new[] { "-F", "--cookies-from-browser", browser }.Concat(PoTokenHelperArgs(toolDirectory)).Append(url)) start.ArgumentList.Add(argument);
+        var cookies = browser is null ? Array.Empty<string>() : new[] { "--cookies-from-browser", browser };
+        foreach (var argument in new[] { "-F" }.Concat(cookies).Concat(PoTokenHelperArgs(toolDirectory)).Append(url)) start.ArgumentList.Add(argument);
         try
         {
             using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start yt-dlp.");
@@ -1134,7 +1431,7 @@ public sealed class Downloader
     /// </summary>
     private async Task WarmUpPoTokenHelperAsync(string toolDirectory, CancellationToken cancellationToken)
     {
-        var deno = Path.Combine(toolDirectory, "deno.exe");
+        var deno = Path.Combine(toolDirectory, Platform.Exe("deno"));
         var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         await EnsureBundledPoTokenServerAsync(toolDirectory, cancellationToken);
         var serverHome = PoTokenServerHome(toolDirectory);
@@ -1196,7 +1493,7 @@ public sealed class Downloader
 
     private async Task ReportAudioQualityAsync(string toolDirectory, string browser, IEnumerable<string> files, CancellationToken cancellationToken)
     {
-        var ffprobe = Path.Combine(toolDirectory, "ffprobe.exe");
+        var ffprobe = Path.Combine(toolDirectory, Platform.Exe("ffprobe"));
         if (!File.Exists(ffprobe)) return;
         var premium = 0;
         var standard = new List<(string File, double Kbps)>();
@@ -1212,21 +1509,33 @@ public sealed class Downloader
 
         // For each standard-quality song, ask YouTube whether a 256k version exists: that tells
         // "this song isn't offered in 256k" apart from "it was offered but the download missed it".
+        // At most a few songs, side by side and time-limited: this runs after every batch, and checking 15 songs one by
+        // one held up the next batch for minutes.
+        const int MaxProbes = 3;
         int noPremiumVersion = 0, missed = 0, unknown = 0;
         var missedNames = new List<string>();
-        foreach (var (file, kbps) in standard.Take(15))
+        var probes = await Task.WhenAll(standard.Take(MaxProbes).Select(async item =>
         {
-            var source = await SourceUrlAsync(ffprobe, file, cancellationToken);
-            var probe = source.Length == 0 ? null : await ProbeFormatsAsync(toolDirectory, browser, source, cancellationToken);
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            limit.CancelAfter(TimeSpan.FromSeconds(30));
+            try
+            {
+                var source = await SourceUrlAsync(ffprobe, item.File, limit.Token);
+                return (item.File, item.Kbps, Premium: source.Length == 0 ? null : (await ProbeFormatsAsync(toolDirectory, browser, source, limit.Token))?.Premium);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return (item.File, item.Kbps, Premium: (bool?)null); }
+        }));
+        foreach (var (file, kbps, isPremium) in probes)
+        {
             var name = Path.GetFileNameWithoutExtension(file);
-            switch (probe?.Premium)
+            switch (isPremium)
             {
                 case true: missed++; missedNames.Add(name); log($"Quality check | {name}: {kbps:0} kbps, but YouTube DOES offer a 256k version (missed)."); break;
                 case false: noPremiumVersion++; log($"Quality check | {name}: {kbps:0} kbps; YouTube has no 256k version of this song."); break;
                 default: unknown++; log($"Quality check | {name}: {kbps:0} kbps; couldn't tell whether a 256k version exists."); break;
             }
         }
-        var unchecked_ = Math.Max(0, standard.Count - 15);
+        var unchecked_ = Math.Max(0, standard.Count - MaxProbes);
         log($"{(missed > 0 ? "WARNING: " : "")}Quality check: {premium} of {total} new song(s) are Premium quality (~256 kbps). " +
             $"Of the {standard.Count} at ~128 kbps: {noPremiumVersion} have no 256k version on YouTube, {missed} missed an available 256k version" +
             (unknown > 0 ? $", {unknown} unknown" : "") + (unchecked_ > 0 ? $", {unchecked_} not checked" : "") + "." +
@@ -1294,16 +1603,22 @@ public sealed class Downloader
             .GroupBy(parts => parts[0].Trim(), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.Last()[1].Trim(), StringComparer.OrdinalIgnoreCase);
         var chosen = supported.FirstOrDefault(browser => bool.TryParse(values.GetValueOrDefault(browser), out var enabled) && enabled);
-        if (chosen is not null) return chosen.ToLowerInvariant();
+        if (chosen is not null) return CookieSource(chosen.ToLowerInvariant());
         // No browser picked (fresh install, or AUTO=true): use the Windows default browser.
         var auto = !File.Exists(path) || (bool.TryParse(values.GetValueOrDefault("AUTO"), out var autoOn) && autoOn);
-        return auto ? DefaultBrowser() : null;
+        return auto ? CookieSource(DefaultBrowser()) : null;
     }
+
+    /// <summary>On Linux a Flatpak Firefox (Bazzite's default) needs its sandboxed profile folder named for yt-dlp.</summary>
+    private static string? CookieSource(string? browser) => browser == "firefox" ? Platform.FirefoxCookieSource() : browser;
+
+    /// <summary>"firefox:/home/…/firefox" is shown as just "firefox".</summary>
+    private static string BrowserName(string? browser) => (browser ?? "").Split(':')[0];
 
     /// <summary>The user's default web browser, as a yt-dlp --cookies-from-browser name.</summary>
     private static string? DefaultBrowser()
     {
-        if (!OperatingSystem.IsWindows()) return null;
+        if (!OperatingSystem.IsWindows()) return Platform.LinuxDefaultBrowser();
         try
         {
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
@@ -1343,7 +1658,7 @@ public sealed class Downloader
     private async Task EnsureBundledPoTokenServerAsync(string toolDirectory, CancellationToken cancellationToken)
     {
         var bundled = Path.Combine(toolDirectory, "bgutil-server");
-        var deno = Path.Combine(toolDirectory, "deno.exe");
+        var deno = Path.Combine(toolDirectory, Platform.Exe("deno"));
         var marker = Path.Combine(bundled, "node_modules", BundledServerReadyMarker);
         if (!File.Exists(deno) || !File.Exists(Path.Combine(bundled, "src", "generate_once.ts")) || File.Exists(marker)) return;
         await bundledServerSetupGate.WaitAsync(cancellationToken);
@@ -1374,7 +1689,8 @@ public sealed class Downloader
             OutputFolder = results.Select(x => x.OutputFolder).LastOrDefault(x => x.Length > 0) ?? "",
             ChangedAudio = results.SelectMany(x => x.ChangedAudio).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
             SkippedTracks = results.SelectMany(x => x.SkippedTracks).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
-            RecoveredFallbackTracks = results.SelectMany(x => x.RecoveredFallbackTracks).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+            RecoveredFallbackTracks = results.SelectMany(x => x.RecoveredFallbackTracks).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+            NotFound = results.SelectMany(x => x.NotFound).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
         };
     }
 

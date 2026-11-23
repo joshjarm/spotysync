@@ -34,7 +34,7 @@ public sealed class DownloadLinksDialog : ThemedDialog
 
     public IReadOnlyList<string> Links { get; private set; } = Array.Empty<string>();
 
-    public DownloadLinksDialog()
+    public DownloadLinksDialog(SpotySync.PortableSettings? settings = null)
     {
         Text = "Download links";
         MinimumSize = new Size(640, 420);
@@ -57,15 +57,22 @@ public sealed class DownloadLinksDialog : ThemedDialog
         input.TextChanged += (_, _) => UpdateCount();
         layout.Controls.Add(input, 0, 1);
 
-        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, BackColor = Color.Transparent, Padding = new Padding(0, 10, 0, 0) };
+        var actions = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 1, BackColor = Color.Transparent, Padding = new Padding(0, 10, 0, 0) };
         actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var i = 0; i < 3; i++) actions.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        for (var i = 0; i < 4; i++) actions.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         var paste = RoundedButton.Make("Paste", ButtonKind.Ghost, Glyph.Copy, (_, _) => { if (Clipboard.ContainsText()) input.Text = Clipboard.GetText(); });
         var cancel = RoundedButton.Make("Cancel", ButtonKind.Secondary);
         var download = RoundedButton.Make("Start download", ButtonKind.Primary, Glyph.Download, (_, _) => AcceptLinks());
         cancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
         count.Dock = DockStyle.Fill; count.TextAlign = ContentAlignment.MiddleLeft;
-        actions.Controls.Add(count, 0, 0); actions.Controls.Add(paste, 1, 0); actions.Controls.Add(cancel, 2, 0); actions.Controls.Add(download, 3, 0);
+        actions.Controls.Add(count, 0, 0); actions.Controls.Add(paste, 2, 0); actions.Controls.Add(cancel, 3, 0); actions.Controls.Add(download, 4, 0);
+        var missing = settings is null ? 0 : SpotySync.NotFoundSongs.Load(settings).Songs.Count;
+        if (missing > 0)
+        {
+            // songs YouTube Music didn't have: add a link for them or search again
+            var notFound = RoundedButton.Make($"Not on YouTube Music ({missing})", ButtonKind.Ghost, Glyph.Music, (_, _) => OpenNotFound(settings!));
+            actions.Controls.Add(notFound, 1, 0);
+        }
         layout.Controls.Add(actions, 0, 2);
         Body.Controls.Add(layout);
         AcceptButton = download;
@@ -85,6 +92,15 @@ public sealed class DownloadLinksDialog : ThemedDialog
     {
         var n = Parse(input.Text).Count;
         count.Text = n == 0 ? "No links detected yet" : n == 1 ? "1 link ready" : $"{n} links ready";
+    }
+
+    private void OpenNotFound(SpotySync.PortableSettings settings)
+    {
+        using var dialog = new NotFoundDialog(settings);
+        if (dialog.ShowDialog(this) != DialogResult.OK || dialog.Links.Count == 0) return;
+        Links = dialog.Links;
+        DialogResult = DialogResult.OK;
+        Close();
     }
 
     private void AcceptLinks()

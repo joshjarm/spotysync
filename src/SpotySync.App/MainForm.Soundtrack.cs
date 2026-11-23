@@ -98,7 +98,8 @@ public sealed partial class MainForm
         SoundtrackResult? result = null;
         await RunBusyAsync($"Saving soundtrack “{dialog.SoundtrackName}”", async token =>
         {
-            result = await service.SaveSoundtrackAsync(dialog.Links, dialog.SoundtrackName, dialog.InitializeInMusicBee, token);
+            var (links, soundtrackName, initialize) = (dialog.Links, dialog.SoundtrackName, dialog.InitializeInMusicBee); // read the dialog here, not on the worker
+            result = await Task.Run(() => service.SaveSoundtrackAsync(links, soundtrackName, initialize, token));
             if (!result.Success) { SetResult("Soundtrack Saver: " + result.Error, Led.Warn); return; }
             SetResult($"Soundtrack “{dialog.SoundtrackName}” saved: {result.Files.Count} file(s) in {result.Folder}" +
                       (result.ImportedFiles > 0 ? $"; {result.PrimedFiles} initialized in MusicBee" : "") +
@@ -191,7 +192,7 @@ public sealed partial class MainForm
         }
         await RunBusyAsync($"Repairing soundtrack “{name}”", async token =>
         {
-            var moved = await service.RepairSoundtrackAsync(name, token);
+            var moved = await Task.Run(() => service.RepairSoundtrackAsync(name, token));
             SetResult($"Soundtrack “{name}”: moved {moved} song(s) back into its folder.", moved > 0 ? Led.Ok : Led.Warn);
         });
         RefreshSoundtrackList();

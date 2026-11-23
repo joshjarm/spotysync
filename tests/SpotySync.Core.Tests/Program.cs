@@ -13,6 +13,12 @@ if (Environment.GetEnvironmentVariable("SPOTYSYNC_FAKE_FFPROBE") == "1")
     return;
 }
 
+if (args.Length >= 5 && args[0].Equals("--songfile-smoke", StringComparison.OrdinalIgnoreCase))
+{
+    Environment.ExitCode = await RunSongFileSmoke(args[1], args[2], args[3], args[4], args.Length > 5 ? int.Parse(args[5]) : 3);
+    return;
+}
+
 if (args.Length == 3 && args[0].Equals("--fallback-smoke", StringComparison.OrdinalIgnoreCase))
 {
     Environment.ExitCode = await RunFallbackSmoke(args[1], args[2]);
@@ -73,7 +79,13 @@ var tests = new (string Name, Action Run)[]
     ("loaded library catches up with new and deleted files", TestLibraryReconcile),
     ("console split and graph range settings round trip", TestLiveSettings),
     ("download queue skips songs already in the library", TestQueueSkipsOwnedSongs),
-    ("download format choice maps to spotDL and yt-dlp", TestDownloadFormat)
+    ("download format choice maps to spotDL and yt-dlp", TestDownloadFormat),
+    ("known songs go to spotDL as a song file (no Spotify lookups)", TestSongFileSkipsSpotifyLookups),
+    ("download speed dial: live changes, rate-limit halving, saved setting", TestDownloadSpeedDial),
+    ("a new version takes over login, settings and caches from the copy used last", TestVersionCarryOver),
+    ("Spotify track details (cover, date, track number) are kept", TestSpotifyTrackDetails),
+    ("songs YouTube Music didn't have are remembered and left out of later downloads", TestNotFoundSongs),
+    ("YouTube's rate-limit message is shown without yt-dlp's prefix and advice", TestRateLimitMessage)
 };
 
 var failures = new List<string>();
@@ -987,4 +999,243 @@ static void TestDownloadFormat()
     Assert(string.Join(' ', Downloader.YtDlpFormatArguments("Opus")).EndsWith("--audio-format best"), "Opus no longer keeps the source audio in yt-dlp");
     Assert(string.Join(' ', Downloader.YtDlpFormatArguments("MP3")).Contains("--audio-format mp3 --audio-quality 320K"), "MP3 is not 320 kbps in yt-dlp");
     Assert(string.Join(' ', Downloader.YtDlpFormatArguments("M4A")).Contains("bestaudio[ext=m4a]"), "M4A does not prefer the AAC stream in yt-dlp");
+}
+
+static void TestSongFileSkipsSpotifyLookups()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "spotysync-songfile-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var settings = PortableSettings.Load(directory);
+        Directory.CreateDirectory(settings.DataDirectory);
+        var full = new TrackInfo
+        {
+            SpotifyId = "AAAAAAAAAAAAAAAAAAAAAA", Title = "Song A", Artists = ["Artist A", "Guest"], Album = "Album A", DurationMs = 201500,
+            CoverUrl = "https://i.scdn.co/image/abc", ReleaseDate = "2019-05-17", TrackNumber = 3, DiscNumber = 1, AlbumTrackCount = 12, Isrc = "USRC11900001"
+        };
+        var song = Downloader.SpotDlSong(full);
+        string[] required = ["name", "artists", "artist", "genres", "disc_number", "disc_count", "album_name", "album_artist", "duration", "year", "date",
+            "track_number", "tracks_count", "song_id", "explicit", "publisher", "url", "isrc", "cover_url", "copyright_text"];
+        Assert(required.All(song.ContainsKey), "the spotDL song is missing a field spotDL needs");
+        // spotDL re-reads Spotify when any of these is empty, which is exactly what the song file is meant to avoid
+        foreach (var key in new[] { "genres", "disc_count", "tracks_count", "track_number", "album_id", "album_artist" })
+            Assert(song[key] is not null, $"spotDL song field {key} is empty, so spotDL would look the song up on Spotify");
+        Assert((int)song["year"]! == 2019 && (string)song["artist"]! == "Artist A" && (int)song["tracks_count"]! == 12, "song details were not carried into the spotDL song");
+        Assert((string)song["url"]! == "https://open.spotify.com/track/AAAAAAAAAAAAAAAAAAAAAA", "the spotDL song has the wrong Spotify link");
+
+        var bare = Downloader.SpotDlSong(new TrackInfo { SpotifyId = "BBBBBBBBBBBBBBBBBBBBBB", Title = "Song B", Artists = ["Artist B"], CoverUrl = "x" });
+        Assert((string)bare["album_name"]! == "Song B" && (string)bare["album_artist"]! == "Artist B" && (int)bare["track_number"]! == 1, "an older cached song has no usable fallbacks");
+        Assert(bare["album_id"] is string { Length: > 0 }, "an older cached song has no album_id, so spotDL would look it up on Spotify");
+
+        var downloader = new Downloader(settings);
+        var write = typeof(Downloader).GetMethod("WriteSongFileAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var known = new List<TrackInfo> { full };
+        var urls = new List<string> { "https://open.spotify.com/track/AAAAAAAAAAAAAAAAAAAAAA", "https://open.spotify.com/track/CCCCCCCCCCCCCCCCCCCCCC", "https://www.youtube.com/watch?v=x" };
+        var result = ((Task<(string? File, IReadOnlyList<string> Others)>)write.Invoke(downloader, [urls, known, CancellationToken.None])!).GetAwaiter().GetResult();
+        Assert(result.File is not null && File.Exists(result.File) && result.File.EndsWith(".spotdl"), "no spotDL song file was written");
+        var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(result.File!)).RootElement;
+        Assert(saved.GetArrayLength() == 1 && saved[0].GetProperty("song_id").GetString() == full.SpotifyId, "the song file does not hold exactly the known song");
+        Assert(result.Others.Count == 2 && !result.Others.Contains(urls[0]), "unknown links were not left for spotDL to look up: " + string.Join(", ", result.Others));
+
+        var none = ((Task<(string? File, IReadOnlyList<string> Others)>)write.Invoke(downloader, [urls, null, CancellationToken.None])!).GetAwaiter().GetResult();
+        Assert(none.File is null && none.Others.Count == 3, "without song details every link must go to spotDL unchanged");
+    }
+    finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+}
+
+static void TestDownloadSpeedDial()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "spotysync-speed-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var settings = PortableSettings.Load(directory);
+        Assert(settings.DownloadThreads == DownloadSpeed.DefaultThreads && settings.DownloadPauseSeconds == 0, "the default speed is not 12 songs at a time without pauses");
+        DownloadSpeed.Load(settings);
+        Assert(DownloadSpeed.Current.Threads == 12, "the speed dial did not load the saved speed");
+        var changes = new List<bool>();
+        void OnChanged(bool byUser) => changes.Add(byUser);
+        DownloadSpeed.Changed += OnChanged;
+        try
+        {
+            var version = DownloadSpeed.Version;
+            DownloadSpeed.Set(DownloadSpeed.Levels.Length - 1, byUser: true);
+            Assert(DownloadSpeed.Current.Threads == 32 && DownloadSpeed.Version == version + 1 && changes.SequenceEqual([true]), "turning the dial up did not register as a live change");
+            Assert(DownloadSpeed.StepDownForLimit() && DownloadSpeed.Current.Threads == 16 && changes[^1] == false, "a rate limit did not halve the speed");
+            DownloadSpeed.Set(0, byUser: true);
+            Assert(DownloadSpeed.Current is { Threads: 1, PauseMax: 10 } && !DownloadSpeed.StepDownForLimit(), "the slowest setting is not 1 song with pauses");
+            DownloadSpeed.Store(settings);
+            settings.Save();
+            var loaded = PortableSettings.Load(directory);
+            Assert(loaded.DownloadThreads == 1 && loaded.DownloadPauseSeconds == 10, "the speed did not round-trip through SpotySync.ini");
+            Assert(DownloadSpeed.IndexFor(5, 0) is var i && DownloadSpeed.Levels[i].Threads is 4 or 6, "an in-between song count does not land on a nearby dial position");
+        }
+        finally { DownloadSpeed.Changed -= OnChanged; DownloadSpeed.Set(DownloadSpeed.IndexFor(DownloadSpeed.DefaultThreads, 0), false); }
+    }
+    finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+}
+
+static void TestVersionCarryOver()
+{
+    var parent = Path.Combine(Path.GetTempPath(), "spotysync-carry-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var older = Path.Combine(parent, "SpotySync-1.5.4-win-x64");
+        var used = Path.Combine(parent, "SpotySync-1.5.5-win-x64");
+        var fresh = Path.Combine(parent, "SpotySync-1.5.6-win-x64");
+        foreach (var (folder, liked) in new[] { (older, "old"), (used, "newest") })
+        {
+            var s = PortableSettings.Load(folder);
+            s.M3uFolder = "Playlists"; s.DownloadFormat = folder == used ? "MP3" : "Opus";
+            s.Save();
+            Directory.CreateDirectory(s.DataDirectory);
+            File.WriteAllText(s.TokenPath, "{}");
+            File.WriteAllText(s.LikedCachePath, liked);
+            File.WriteAllText(Path.Combine(s.DataDirectory, "existing-setup-declined.txt"), "x");
+            Directory.CreateDirectory(Path.Combine(folder, "Tools"));
+            File.WriteAllText(Path.Combine(folder, "Tools", "browser_options.txt"), "firefox");
+        }
+        File.SetLastWriteTimeUtc(Path.Combine(older, "Data", "liked-cache.json"), DateTime.UtcNow.AddDays(-3));
+        File.SetLastWriteTimeUtc(Path.Combine(older, "Data", "spotify-token.json"), DateTime.UtcNow.AddDays(-3));
+        File.SetLastWriteTimeUtc(Path.Combine(older, "Data", "existing-setup-declined.txt"), DateTime.UtcNow.AddDays(-3));
+        File.SetLastWriteTimeUtc(Path.Combine(older, "SpotySync.ini"), DateTime.UtcNow.AddDays(-3));
+        Directory.CreateDirectory(fresh);
+
+        VersionCarryOver.RunIfFresh(fresh);
+        Assert(VersionCarryOver.CarriedFrom?.TrimEnd('\\') == used, "the new version did not take over from the copy used last: " + VersionCarryOver.CarriedFrom);
+        var carried = PortableSettings.Load(fresh);
+        Assert(File.ReadAllText(carried.LikedCachePath) == "newest" && File.Exists(carried.TokenPath), "the Spotify login and caches were not carried over");
+        Assert(carried.DownloadFormat == "MP3", "the settings were not carried over");
+        Assert(!File.Exists(Path.Combine(carried.DataDirectory, "existing-setup-declined.txt")), "the old 'don't ask again' note was carried over");
+        Assert(File.Exists(Path.Combine(fresh, "Tools", "browser_options.txt")), "the signed-in browser choice was not carried over");
+        Assert(carried.M3uFolder == Path.Combine(used, "Playlists"), "a playlist folder relative to the old copy no longer points at it: " + carried.M3uFolder);
+        Assert(File.ReadAllText(Path.Combine(used, "Data", "liked-cache.json")) == "newest", "the old copy was changed");
+
+        File.WriteAllText(carried.LikedCachePath, "mine");
+        VersionCarryOver.RunIfFresh(fresh);
+        Assert(File.ReadAllText(carried.LikedCachePath) == "mine", "a copy that has already started was overwritten");
+    }
+    finally { if (Directory.Exists(parent)) Directory.Delete(parent, true); }
+}
+
+static void TestSpotifyTrackDetails()
+{
+    using var doc = System.Text.Json.JsonDocument.Parse("""
+        {"id":"AAAAAAAAAAAAAAAAAAAAAA","name":"Song A","duration_ms":200000,"track_number":4,"disc_number":2,"explicit":true,
+         "external_ids":{"isrc":"USRC1"},"artists":[{"name":"Artist A"}],
+         "album":{"name":"Album A","release_date":"2020-02-02","total_tracks":11,"artists":[{"name":"Band"}],
+                  "images":[{"url":"small","width":64},{"url":"big","width":640},{"url":"mid","width":300}]}}
+        """);
+    var parse = typeof(SpotifyApi).GetMethod("ParseTrack", BindingFlags.Static | BindingFlags.NonPublic)!;
+    var track = (TrackInfo)parse.Invoke(null, [doc.RootElement])!;
+    Assert(track.CoverUrl == "big" && track.ReleaseDate == "2020-02-02" && track.AlbumArtist == "Band" && track.AlbumTrackCount == 11, "album details were not read from Spotify");
+    Assert(track.TrackNumber == 4 && track.DiscNumber == 2 && track.Explicit && track.Isrc == "USRC1", "track details were not read from Spotify");
+}
+
+// Real end-to-end check of the song-file path: spotDL gets SpotySync's own song details and must download without any
+// Spotify lookup ("Processing query" lines). Args: <empty portable folder> <music folder> <spotdl.exe> <liked-cache.json> [count]
+static async Task<int> RunSongFileSmoke(string portableRoot, string musicFolder, string spotdl, string likedCache, int count)
+{
+    try
+    {
+        Directory.CreateDirectory(musicFolder);
+        var settings = PortableSettings.Load(portableRoot);
+        settings.MusicFolder = musicFolder;
+        settings.DownloaderPath = spotdl;
+        settings.AutoUpdateYtDlp = false;
+        settings.Save();
+        var cache = JsonStore.Load(likedCache, () => new LikedTrackCache());
+        var tracks = cache.Tracks.Where(t => !t.IsLocal && t.SpotifyId.Length > 0).Skip(40).Take(count).ToList();
+        var lines = new List<string>();
+        var firstDone = 0;
+        var downloader = new Downloader(settings, message => { lines.Add(message); if (message.Contains("Downloaded \"", StringComparison.Ordinal)) Volatile.Write(ref firstDone, 1); Console.WriteLine("LOG " + message); });
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        // halfway through, turn the speed dial down like a person would: the batch must restart and keep finished songs
+        _ = Task.Run(async () => { while (Volatile.Read(ref firstDone) == 0) await Task.Delay(500); DownloadSpeed.Set(DownloadSpeed.IndexFor(4, 0), byUser: true); });
+        var result = await downloader.RunManualAsync(tracks.Select(t => "https://open.spotify.com/track/" + t.SpotifyId).ToList(), tracks);
+        watch.Stop();
+        var lookups = lines.Count(l => l.Contains("open.spotify.com/track", StringComparison.OrdinalIgnoreCase)); // spotDL prints the link it looks up
+        var restarts = lines.Count(l => l.Contains("restarting this batch", StringComparison.Ordinal));
+        var files = Directory.EnumerateFiles(musicFolder).Where(f => !f.EndsWith(".lrc", StringComparison.OrdinalIgnoreCase)).ToList();
+        Console.WriteLine($"RESULT exit {result.ExitCode}, errors {result.ReportedErrors}, {files.Count} file(s), {lookups} Spotify lookup line(s), {restarts} restart(s), {watch.Elapsed.TotalSeconds:0}s for {tracks.Count} song(s)");
+        foreach (var file in files) Console.WriteLine("FILE " + Path.GetFileName(file) + "  " + new FileInfo(file).Length / 1024 + " KB");
+        var library = await new LibraryScanner(settings).ScanAsync(true);
+        foreach (var song in library) Console.WriteLine($"TAGS {song.Artist} | {song.Title} | {song.Album} | {song.DurationMs / 1000}s | {song.Comment}");
+        Assert(lookups == 0, "spotDL still looked songs up on Spotify");
+        Assert(files.Count == tracks.Count, $"expected {tracks.Count} audio file(s), got {files.Count}");
+        Console.WriteLine("PASS song file smoke");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("FAIL song file smoke: " + ex);
+        return 1;
+    }
+}
+
+static void TestRateLimitMessage()
+{
+    var line = "ERROR: [youtube] TyNMnKRQupA: Video unavailable. This content isn't available, try again later. Your account has been rate-limited by YouTube for up to an hour. It is recommended to use `-t sleep` to add a delay between video requests.";
+    var message = Downloader.RateLimitMessage(line);
+    Assert(message == "Your account has been rate-limited by YouTube for up to an hour.", "rate-limit message: " + message);
+    Assert(Downloader.RateLimitMessage("ERROR: [youtube] abcdefghijk: HTTP Error 429: Too Many Requests") == "HTTP Error 429: Too Many Requests", "429 message");
+}
+
+static void TestNotFoundSongs()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "spotysync-notfound-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var settings = PortableSettings.Load(directory);
+        Directory.CreateDirectory(settings.DataDirectory);
+        Assert(NotFoundSongs.NameFromDownloaderLine("LookupError: No results found for song: Alex Peipman - STATIK") == "Alex Peipman - STATIK", "spotDL's not-found line was not read");
+        Assert(NotFoundSongs.NameFromDownloaderLine("YouTube Music returned no usable results for proxzi, rich disease - shame on u after 3 attempts") == "proxzi, rich disease - shame on u",
+            "spotDL's empty-search line was not read");
+        Assert(NotFoundSongs.NameFromDownloaderLine("Downloaded \"Kibo\": https://music.youtube.com/watch?v=x") is null, "a normal line was taken for a not-found song");
+
+        var statik = new TrackInfo { SpotifyId = "0DqdeOse2QMghMS78moSWS", Title = "STATIK", Artists = ["Alex Peipman", "Mike Klubnika"], Album = "A C H T U N G !", DurationMs = 146411 };
+        var shame = new TrackInfo { SpotifyId = "SSSSSSSSSSSSSSSSSSSSSS", Title = "shame on u", Artists = ["proxzi", "rich disease"] };
+        var kibo = new TrackInfo { SpotifyId = "0yUs4kfYFLWI72EOhhtNyI", Title = "Kibo", Artists = ["Dion Timmer"] };
+        var resolved = NotFoundSongs.Resolve(["Alex Peipman - STATIK", "proxzi, rich disease - shame on u"], [statik, shame, kibo]);
+        Assert(resolved.Count == 2 && resolved.Contains(statik) && resolved.Contains(shame), "not-found names were not matched to the right songs");
+
+        NotFoundSongs.MarkMissing(settings, [statik, shame]);
+        var list = NotFoundSongs.Load(settings);
+        Assert(list.Songs.Count == 2 && list.Songs[statik.SpotifyId].Tries == 1 && list.Songs[statik.SpotifyId].Artists == "Alex Peipman, Mike Klubnika", "missing songs were not saved");
+        Assert(NotFoundSongs.ShouldSkip(list.Songs[statik.SpotifyId], DateTimeOffset.Now), "a song missing today is not left out");
+        Assert(!NotFoundSongs.ShouldSkip(list.Songs[statik.SpotifyId], DateTimeOffset.Now + NotFoundSongs.RetryAfter + TimeSpan.FromDays(1)), "an old miss is never searched again");
+
+        NotFoundSongs.SetManualUrl(settings, statik.SpotifyId, " https://music.youtube.com/watch?v=abc ");
+        list = NotFoundSongs.Load(settings);
+        Assert(!NotFoundSongs.ShouldSkip(list.Songs[statik.SpotifyId], DateTimeOffset.Now), "a song with a link from the user is left out");
+        var song = Downloader.SpotDlSong(statik, list.Songs[statik.SpotifyId].ManualUrl);
+        Assert((string?)song["download_url"] == "https://music.youtube.com/watch?v=abc", "spotDL doesn't get the user's link");
+        Assert(Downloader.SpotDlSong(kibo)["download_url"] is null, "a normal song got a download link");
+
+        // the song file hands spotDL the user's link
+        var downloader = new Downloader(settings);
+        var write = typeof(Downloader).GetMethod("WriteSongFileAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var urls = new List<string> { statik.Url(), kibo.Url() };
+        var written = ((Task<(string? File, IReadOnlyList<string> Others)>)write.Invoke(downloader, [urls, new List<TrackInfo> { statik, kibo }, CancellationToken.None])!).GetAwaiter().GetResult();
+        var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(written.File!)).RootElement;
+        var byId = saved.EnumerateArray().ToDictionary(e => e.GetProperty("song_id").GetString()!, e => e.GetProperty("download_url"));
+        Assert(byId[statik.SpotifyId].GetString() == "https://music.youtube.com/watch?v=abc" && byId[kibo.SpotifyId].ValueKind == System.Text.Json.JsonValueKind.Null,
+            "the song file doesn't carry the user's link");
+
+        // a big download leaves out recent misses but keeps songs with a link
+        using var service = new SpotySyncService(settings);
+        var leaveOut = typeof(SpotySyncService).GetMethod("LeaveOutKnownMissing", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var kept = (List<string>)leaveOut.Invoke(service, [new List<string> { statik.Url(), shame.Url(), kibo.Url() }])!;
+        Assert(kept.Count == 2 && kept.Contains(statik.Url()) && kept.Contains(kibo.Url()), "recent misses were not left out: " + string.Join(", ", kept));
+
+        NotFoundSongs.MarkFound(settings, [statik.SpotifyId]);
+        Assert(!NotFoundSongs.Load(settings).Songs.ContainsKey(statik.SpotifyId), "a song that downloaded is still in the not-found list");
+        NotFoundSongs.MarkMissing(settings, [shame]);
+        Assert(NotFoundSongs.Load(settings).Songs[shame.SpotifyId].Tries == 2, "searching again doesn't count");
+    }
+    finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+}
+
+static class TrackLinks
+{
+    public static string Url(this TrackInfo track) => "https://open.spotify.com/track/" + track.SpotifyId;
 }

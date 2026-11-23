@@ -309,7 +309,10 @@ public sealed class SpotySyncService : IDisposable
     // Large requests (e.g. thousands of missing Likes) run in batches: one downloader
     // process per batch keeps the Windows command line short, and each batch is
     // imported into MusicBee before the next starts, so stopping loses nothing.
-    private const int DownloadBatchSize = 50;
+    // Bigger batches when more songs download at once, so the workers stay busy (the song file keeps the command line short).
+    private static int DownloadBatchSize => Math.Clamp(DownloadSpeed.Current.Threads * 8, 50, 200);
+    // Song details from SpotySync's own Spotify caches, by Spotify ID (filled before a download starts).
+    private Dictionary<string, TrackInfo> knownTracks = new(StringComparer.OrdinalIgnoreCase);
     private bool spotifyTrackLookupBlocked;
 
     public async Task<ManualDownloadResult> DownloadLinksAsync(IEnumerable<string> links, CancellationToken cancellationToken = default)
@@ -326,40 +329,184 @@ public sealed class SpotySyncService : IDisposable
             log("Everything in these links is already in your library - nothing to download.");
             return new ManualDownloadResult { Success = true, ResolvedMusicFolder = settings.ResolvePath(settings.MusicFolder) };
         }
+        if (urls.Count > 1) urls = LeaveOutKnownMissing(urls);
+        if (urls.Count == 0)
+        {
+            log("Nothing left to download.");
+            return new ManualDownloadResult { Success = true, ResolvedMusicFolder = settings.ResolvePath(settings.MusicFolder) };
+        }
         log($"Download queue: {urls.Count} song(s).");
-        if (urls.Count <= DownloadBatchSize) return await DownloadLinkBatchAsync(urls, cancellationToken);
+        var batchSize = DownloadBatchSize;
+        if (urls.Count <= batchSize) return await DownloadLinkBatchAsync(urls, cancellationToken);
 
-        var batches = urls.Chunk(DownloadBatchSize).ToList();
-        log($"Large download: {urls.Count} links in {batches.Count} batches of up to {DownloadBatchSize}. " +
-            "Each batch is added to MusicBee before the next one starts, so you can cancel at any time and continue later.");
+        var batches = urls.Chunk(batchSize).ToList();
+        log($"Large download: {urls.Count} songs in {batches.Count} batches of up to {batchSize}. " +
+            "Each finished batch is added to MusicBee in the background while the next one downloads.");
         var total = new ManualDownloadResult { Success = true };
         var troubledBatches = 0;
-        for (var i = 0; i < batches.Count; i++)
+        // MusicBee adds one batch at a time, in order, while downloading carries on
+        var importChain = Task.CompletedTask;
+        var musicBeeWait = new MusicBeeWait();
+        try
         {
-            await DownloadProcesses.WaitIfPausedAsync(cancellationToken); // a paused run starts no new batch
-            cancellationToken.ThrowIfCancellationRequested();
-            log($"Batch {i + 1} of {batches.Count} ({total.NewAudioFiles} new song(s) so far)…");
-            var part = await DownloadLinkBatchAsync(batches[i].ToList(), cancellationToken);
-            total.NewAudioFiles += part.NewAudioFiles;
-            total.ImportedFiles += part.ImportedFiles;
-            total.PrimedFiles += part.PrimedFiles;
-            total.Files.AddRange(part.Files);
-            if (part.ResolvedMusicFolder.Length > 0) total.ResolvedMusicFolder = part.ResolvedMusicFolder;
-            if (!part.Success)
+            for (var i = 0; i < batches.Count; i++)
             {
-                troubledBatches++;
-                if (part.ExitCode != 0) total.ExitCode = part.ExitCode;
-                log($"WARNING: batch {i + 1} of {batches.Count}: {part.Error} Continuing with the next batch.");
+                await DownloadProcesses.WaitIfPausedAsync(cancellationToken); // a paused run starts no new batch
+                cancellationToken.ThrowIfCancellationRequested();
+                log($"Batch {i + 1} of {batches.Count} ({total.NewAudioFiles} new song(s) so far)…");
+                // MusicBee is read only for the first batch: later on it is busy adding the previous batch, and
+                // waiting for it would hold up the download again
+                var part = await DownloadLinkBatchAsync(batches[i].ToList(), cancellationToken, importInBackground: true, readMusicBee: i == 0);
+                total.NewAudioFiles += part.NewAudioFiles;
+                total.NotFound += part.NotFound;
+                total.Files.AddRange(part.Files);
+                if (part.ResolvedMusicFolder.Length > 0) total.ResolvedMusicFolder = part.ResolvedMusicFolder;
+                if (part.ImportLater.Count > 0)
+                {
+                    var previous = importChain;
+                    var files = part.ImportLater;
+                    var number = i + 1;
+                    importChain = Task.Run(() => ImportBatchInBackgroundAsync(previous, files, number, batches.Count, total, musicBeeWait));
+                }
+                var notFound = part.NotFound > 0 ? $", {part.NotFound} not on YouTube Music" : "";
+                if (part.Success)
+                    log($"Batch {i + 1} of {batches.Count} done: {part.NewAudioFiles} downloaded{notFound}." +
+                        (part.ImportLater.Count > 0 && i + 1 < batches.Count ? " Adding them to MusicBee while the next batch downloads." : ""));
+                else
+                {
+                    troubledBatches++;
+                    if (part.ExitCode != 0) total.ExitCode = part.ExitCode;
+                    log($"WARNING: batch {i + 1} of {batches.Count}: {part.NewAudioFiles} downloaded{notFound}; {part.Error} Continuing with the next batch.");
+                }
             }
         }
+        catch (OperationCanceledException)
+        {
+            if (!importChain.IsCompleted)
+            {
+                if (!musicBeeWait.Waiting) log("Download stopped. Finishing adding the songs that were already downloaded to MusicBee…");
+                musicBeeWait.GiveUp.Cancel(); // a closed MusicBee isn't waited for after Stop
+                try { await importChain; } catch { }
+                LogWaitingForMusicBee(total);
+            }
+            throw;
+        }
+        if (!importChain.IsCompleted)
+        {
+            if (!musicBeeWait.Waiting) log("All batches downloaded. Waiting for MusicBee to finish adding the last batch…");
+            musicBeeWait.GiveUp.Cancel(); // MusicBee still closed: don't hold the download open for it
+        }
+        await importChain;
+        LogWaitingForMusicBee(total);
+        var missingNote = total.NotFound > 0 ? $" {total.NotFound} song(s) weren't on YouTube Music; they're in the Not on YouTube Music list." : "";
         if (troubledBatches > 0)
         {
             total.Success = false;
             total.Error = $"{troubledBatches} of {batches.Count} batch(es) had songs that could not be downloaded (see the Activity log). " +
-                $"Kept {total.NewAudioFiles} new audio file(s).";
+                $"Kept {total.NewAudioFiles} new audio file(s).{missingNote}";
         }
-        else log($"Large download complete: {total.NewAudioFiles} audio file(s), {total.ImportedFiles} verified in MusicBee.");
+        else log($"Large download complete: {total.NewAudioFiles} audio file(s), {(Platform.HasMusicBee ? $"{total.ImportedFiles} verified in MusicBee" : "now in your music folder")}.{missingNote}");
         return total;
+    }
+
+    /// <summary>Adds one finished batch to MusicBee after the previous one, without holding up the download.</summary>
+    private async Task ImportBatchInBackgroundAsync(Task previous, List<string> files, int batch, int batches, ManualDownloadResult total,
+        MusicBeeWait wait)
+    {
+        try { await previous; } catch { }
+        try
+        {
+            if (!await WaitForMusicBeeAsync(batch, files.Count, wait))
+            {
+                lock (total) total.WaitingForMusicBee += files.Count;
+                return;
+            }
+            // not cancelled by Stop: songs that are already downloaded still end up in MusicBee
+            var import = await ImportIntoMusicBeeAsync(files, CancellationToken.None,
+                $"Adding batch {batch} of {batches} to MusicBee in the background: {files.Count} song(s)" +
+                (settings.PrimeDownloadsInMusicBee ? ", initializing each for one second." : "."));
+            lock (total)
+            {
+                total.ImportedFiles += import.Imported;
+                total.PrimedFiles += import.Primed;
+            }
+        }
+        catch (Exception ex) { log($"WARNING: batch {batch}'s songs were kept, but adding them to MusicBee failed: " + ex.Message); }
+    }
+
+    private void LogWaitingForMusicBee(ManualDownloadResult total)
+    {
+        if (total.WaitingForMusicBee > 0)
+            log($"MusicBee stayed closed, so {total.WaitingForMusicBee} downloaded song(s) weren't added to it. They're in your music folder; " +
+                "the next sync with MusicBee open adds them.");
+    }
+
+    /// <summary>Shared by one large download's background imports: whether MusicBee is being waited for, and when to give up.</summary>
+    private sealed class MusicBeeWait
+    {
+        public readonly CancellationTokenSource GiveUp = new();
+        public volatile bool Waiting;
+        public bool Announced;
+    }
+
+    private static readonly TimeSpan MusicBeeRecheck = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// True once MusicBee is open (started for you when MusicBee auto-start is on). While it is closed the batch waits and
+    /// downloading carries on; false when the download ended (or was stopped) and MusicBee is still closed.
+    /// </summary>
+    private async Task<bool> WaitForMusicBeeAsync(int batch, int songs, MusicBeeWait wait)
+    {
+        if (await musicBee.GetVersionAsync() > 0) return true;
+        if (settings.AutoStartMusicBee)
+        {
+            try { await musicBee.EnsureRunningAsync(wait.GiveUp.Token); return true; }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { log("MusicBee couldn't be started: " + ex.Message); }
+        }
+        if (wait.GiveUp.IsCancellationRequested) return false;
+        log(wait.Announced
+            ? $"Batch {batch} ({songs} song(s)) is also waiting for MusicBee."
+            : $"MusicBee isn't open, so batch {batch} ({songs} song(s)) waits and is added as soon as you open MusicBee. Downloading carries on meanwhile.");
+        wait.Announced = true;
+        wait.Waiting = true;
+        try
+        {
+            while (true)
+            {
+                try { await Task.Delay(MusicBeeRecheck, wait.GiveUp.Token); }
+                catch (OperationCanceledException) { return false; }
+                if (await musicBee.GetVersionAsync() > 0)
+                {
+                    log("MusicBee is open again; adding the songs that were waiting.");
+                    wait.Announced = false;
+                    return true;
+                }
+            }
+        }
+        finally { wait.Waiting = false; }
+    }
+
+    /// <summary>
+    /// Leaves out songs YouTube Music didn't have recently, so a big download doesn't search for them again in every
+    /// run. Songs with a YouTube link from the user stay in.
+    /// </summary>
+    private List<string> LeaveOutKnownMissing(List<string> urls)
+    {
+        Dictionary<string, NotFoundSong> missing;
+        try { missing = NotFoundSongs.Load(settings).Songs; }
+        catch { return urls; }
+        if (missing.Count == 0) return urls;
+        var now = DateTimeOffset.Now;
+        var kept = urls.Where(url =>
+        {
+            var id = SpotifyIdExtractor.FromText(url);
+            return id.Length == 0 || !missing.TryGetValue(id, out var song) || !NotFoundSongs.ShouldSkip(song, now);
+        }).ToList();
+        if (kept.Count < urls.Count)
+            log($"Left out {urls.Count - kept.Count} song(s) YouTube Music didn't have last time, so they aren't searched for again. " +
+                "They're in the Not on YouTube Music list (Download links), where you can add a YouTube link or try again.");
+        return kept;
     }
 
     /// <summary>Drops share-tracking query strings (?si=…&amp;pt=…) from Spotify links; spotDL can fail on them.</summary>
@@ -388,6 +535,7 @@ public sealed class SpotySyncService : IDisposable
                 if (track.SpotifyId.Length > 0 && !track.IsLocal) known.TryAdd(track.SpotifyId, track);
         }
         catch { return urls; }
+        knownTracks = known;
 
         var expanded = new List<string>();
         var playlistsExpanded = 0;
@@ -426,16 +574,19 @@ public sealed class SpotySyncService : IDisposable
         return kept;
     }
 
-    private async Task<ManualDownloadResult> DownloadLinkBatchAsync(List<string> urls, CancellationToken cancellationToken)
+    private async Task<ManualDownloadResult> DownloadLinkBatchAsync(List<string> urls, CancellationToken cancellationToken,
+        bool importInBackground = false, bool readMusicBee = true)
     {
         var result = new ManualDownloadResult();
         try
         {
             var spotifyIds = urls.Select(url => SpotifyIdExtractor.FromText(url)).Where(id => id.Length > 0).ToList();
-            var expectedTracks = new List<TrackInfo>();
-            if (spotifyIds.Count > 0 && !spotifyTrackLookupBlocked)
+            // Song details come from SpotySync's own caches; Spotify is asked only about songs it has never seen.
+            var expectedTracks = spotifyIds.Where(knownTracks.ContainsKey).Select(id => knownTracks[id]).ToList();
+            var unknownIds = spotifyIds.Where(id => !knownTracks.ContainsKey(id)).ToList();
+            if (unknownIds.Count > 0 && !spotifyTrackLookupBlocked)
             {
-                try { expectedTracks = await spotify.GetTracksAsync(spotifyIds, cancellationToken); }
+                try { expectedTracks.AddRange(await spotify.GetTracksAsync(unknownIds, cancellationToken)); }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     // spot2yt can still resolve the link itself, and its readable
@@ -445,7 +596,9 @@ public sealed class SpotySyncService : IDisposable
                 }
             }
             List<LocalTrack> beforeLibrary = new();
-            if (settings.LocalBackend is LocalBackendKind.MusicBee or LocalBackendKind.Both)
+            if (settings.LocalBackend is LocalBackendKind.MusicBee or LocalBackendKind.Both && !readMusicBee)
+                beforeLibrary = await scanner.ScanAsync(false, cancellationToken);
+            else if (settings.LocalBackend is LocalBackendKind.MusicBee or LocalBackendKind.Both)
             {
                 var snapshot = await musicBee.GetSnapshotAsync(cancellationToken);
                 AdoptMusicFolderFromMusicBeeIfNeeded(snapshot.Tracks);
@@ -472,7 +625,19 @@ public sealed class SpotySyncService : IDisposable
             var importFiles = download.ChangedAudio.Concat(newlyVerified).Where(File.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             result.Files = importFiles;
             result.NewAudioFiles = importFiles.Count;
-            if (settings.ImportDownloadsIntoMusicBee && settings.LocalBackend is LocalBackendKind.MusicBee or LocalBackendKind.Both && importFiles.Count > 0)
+            // remember songs YouTube Music didn't have (and forget the ones that have now been downloaded)
+            var missing = NotFoundSongs.Resolve(download.NotFound, expectedTracks.Where(track => !verification.Ids.Contains(track.SpotifyId)));
+            result.NotFound = missing.Count;
+            try
+            {
+                NotFoundSongs.MarkMissing(settings, missing);
+                NotFoundSongs.MarkFound(settings, verification.Ids);
+            }
+            catch (Exception ex) { log("WARNING: couldn't save the Not on YouTube Music list: " + ex.Message); }
+            var missingIds = missing.Select(track => track.SpotifyId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var importing = settings.ImportDownloadsIntoMusicBee && settings.LocalBackend is LocalBackendKind.MusicBee or LocalBackendKind.Both && importFiles.Count > 0;
+            if (importing && importInBackground) result.ImportLater = importFiles;
+            else if (importing)
             {
                 try
                 {
@@ -483,14 +648,18 @@ public sealed class SpotySyncService : IDisposable
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex) { log("WARNING: downloaded files were kept, but MusicBee import/initialization failed: " + ex.Message); }
             }
-            var allExpectedVerified = expectedTracks.Count > 0 && expectedTracks.All(track => verification.Ids.Contains(track.SpotifyId));
+            // songs YouTube Music doesn't have are accounted for: they are in the list, not a failed download
+            var allExpectedVerified = expectedTracks.Count > 0 &&
+                expectedTracks.All(track => verification.Ids.Contains(track.SpotifyId) || missingIds.Contains(track.SpotifyId));
             if ((download.ExitCode != 0 || download.ReportedErrors > 0) && !allExpectedVerified)
             {
-                result.Error = $"{download.DownloaderName} exit code {download.ExitCode}; reported errors {download.ReportedErrors}. " +
-                    $"Kept {importFiles.Count} successful new/updated audio file(s).";
+                var others = expectedTracks.Count(track => !verification.Ids.Contains(track.SpotifyId) && !missingIds.Contains(track.SpotifyId));
+                result.Error = others > 0
+                    ? $"{others} song(s) didn't download for another reason ({download.DownloaderName} exit code {download.ExitCode}); see the Console."
+                    : $"{download.DownloaderName} exit code {download.ExitCode}; reported errors {download.ReportedErrors}.";
                 return result;
             }
-            if (download.ExitCode != 0 || download.ReportedErrors > 0)
+            if ((download.ExitCode != 0 || download.ReportedErrors > 0) && missing.Count == 0)
                 log("Downloader reported an error, but the requested Spotify track(s) were all verified in the music folder.");
             if (importFiles.Count == 0 && !allExpectedVerified)
             {
@@ -498,7 +667,9 @@ public sealed class SpotySyncService : IDisposable
                 return result;
             }
             result.Success = true;
-            log($"Manual download complete: {result.NewAudioFiles} audio file(s), {result.ImportedFiles} verified in MusicBee.");
+            if (!importInBackground)
+                log($"Manual download complete: {result.NewAudioFiles} audio file(s), {(Platform.HasMusicBee ? $"{result.ImportedFiles} verified in MusicBee" : "now in your music folder")}." +
+                    (missing.Count > 0 ? $" {missing.Count} song(s) weren't on YouTube Music; they're in the Not on YouTube Music list." : ""));
             return result;
         }
         catch (OperationCanceledException)
@@ -800,20 +971,25 @@ public sealed class SpotySyncService : IDisposable
         return null;
     }
 
-    private async Task<MusicBeeImportResult> ImportIntoMusicBeeAsync(IEnumerable<string> files, CancellationToken cancellationToken)
+    private async Task<MusicBeeImportResult> ImportIntoMusicBeeAsync(IEnumerable<string> files, CancellationToken cancellationToken, string? message = null)
     {
         // MusicBee's folder monitor can rename a freshly downloaded file after
         // verification but before the bridge request. Preserve the requested
         // path so bridge v18 can resolve it to MusicBee's current library path.
         var paths = files.Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (paths.Count > 0)
-            log(settings.PrimeDownloadsInMusicBee
+            log(message ?? (settings.PrimeDownloadsInMusicBee
                 ? $"MusicBee final stage: importing and silently initializing {paths.Count} track(s) for one second each."
-                : $"MusicBee final stage: importing {paths.Count} track(s).");
+                : $"MusicBee final stage: importing {paths.Count} track(s)."));
         MusicBeeImportResult imported;
         for (var attempt = 1; ; attempt++)
         {
             try { imported = await musicBee.ImportFilesAsync(paths, settings.PrimeDownloadsInMusicBee, cancellationToken); break; }
+            catch (HttpRequestException ex) when (ex.InnerException is System.Net.Sockets.SocketException { SocketErrorCode: System.Net.Sockets.SocketError.ConnectionRefused })
+            {
+                // nothing is listening: MusicBee was closed, not busy
+                throw new InvalidOperationException("MusicBee isn't open (it was closed while SpotySync was working). The songs are in your music folder; the next sync with MusicBee open adds them.", ex);
+            }
             catch (Exception ex) when (attempt < 3 && ex is InvalidOperationException or TimeoutException or HttpRequestException or ApiException)
             {
                 // MusicBee's folder monitor sometimes holds the library for a moment right after a download

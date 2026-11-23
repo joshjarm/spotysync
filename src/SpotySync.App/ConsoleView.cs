@@ -100,6 +100,14 @@ internal static class LogClassifier
         if (Starts("Audio download stage complete")) { var n = N(); return (true, n.Length >= 2 ? $"Downloaded {n[0]}/{n[1]} songs" : "Downloads finished", true); }
         if (Starts("Downloaded: ")) return (true, "✓ " + t["Downloaded: ".Length..], true);
         if (Starts("MusicBee final stage")) return (true, "Adding to MusicBee…", false);
+        if (Starts("Adding batch ")) return (true, t, false);
+        if (Regex.IsMatch(t, @"^Batch \d+ of \d+ done:")) return (true, t, true);
+        if (t.Contains("Not on YouTube Music: ", StringComparison.Ordinal)) return (true, t[t.IndexOf("Not on YouTube Music: ", StringComparison.Ordinal)..], false);
+        if (Starts("Left out ") || Starts("All batches downloaded") || Starts("Download stopped. Finishing")) return (true, t, false);
+        if (Starts("YouTube rate limit lifted") || Starts("MusicBee is open again")) return (true, t, true);
+        if (Starts("YouTube rate limit") || Starts("MusicBee isn't open") || Starts("MusicBee stayed closed") ||
+            Regex.IsMatch(t, @"^Batch \d+ \(\d+ song\(s\)\) is also waiting for MusicBee") ||
+            t.Contains("looked like they weren't on YouTube Music during the limit", StringComparison.Ordinal)) return (true, t, false);
         if (Starts("MusicBee verified")) { var n = N(); return (true, n.Length >= 2 ? $"MusicBee: {n[0]}/{n[1]} added" : "Added to MusicBee", true); }
         if (Starts("Preview ready:")) { var n = N(); return (true, n.Length >= 2 ? $"Preview ready: {n[1]} change(s) across {n[0]} playlists" : "Preview ready", true); }
         if (Starts("Applying '"))
@@ -446,6 +454,7 @@ internal sealed class ConsoleView : Panel
         }
 
         entries.Add(entry);
+        if (entries.Count == 1) UpdateHiddenNote(); // drop the "Nothing logged yet" hint with the first line
         if (entries.Count > MaxEntries) { entries.RemoveRange(0, 1000); Rerender(); Reset?.Invoke(); return; }
         if (Passes(entry)) AppendLine(entry);
         else if (entry.IsDetail) { hiddenDetail++; UpdateHiddenNote(); }
